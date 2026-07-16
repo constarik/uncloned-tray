@@ -1,0 +1,7 @@
+﻿# local runtime config (per-machine settings)
+UnclonedTray.ini
+
+# probe/scratch files
+_*.ahk
+_*.txt
+_*.ini
