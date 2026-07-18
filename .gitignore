@@ -5,3 +5,6 @@ UnclonedTray.ini
 _*.ahk
 _*.txt
 _*.ini
+
+# python bytecode
+__pycache__/

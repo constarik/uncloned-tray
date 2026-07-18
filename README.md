@@ -73,6 +73,32 @@ signature, so on locked-down machines these tools may be blocked or quarantined.
 That is a policy decision, not a bug. A readable script is far easier to get
 approved than a nameless binary — you can hand IT the source.
 
+## Python implementation
+
+The note above stopped being hypothetical the day after it was written: an EDR
+(SentinelOne) quarantined the AutoHotkey **interpreter itself** — binaries and
+Start Menu shortcuts included — as a package-level reputation verdict on the
+official installer. Not this script's behavior; the runtime as a class.
+
+`python/untray.py` is a second, self-contained implementation of the same host
+for exactly that situation:
+
+- pure standard library + `ctypes` — no pip installs, no compiled binaries,
+  nothing to flag except `python.exe` itself;
+- **no keyboard hook**: lock-key enforcement listens to Raw Input (`WM_INPUT`)
+  notifications and re-asserts the toggle state ~30 ms after the key is
+  touched — registration-based, not interception;
+- the same `MoveFileExW`-without-replace mover, same categories, same guards;
+- reads the same `UnclonedTray.ini` (shared sections and keys), so a machine
+  can switch implementations freely;
+- run with `pythonw.exe python\untray.py`; **Run at startup** writes a single
+  HKCU `Run` registry value.
+
+The AutoHotkey version stays primary: its `Always *` modes suppress the key
+press outright via a native hook, which the port deliberately does not attempt.
+The trade is a few tens of milliseconds of toggle-and-revert for a zero-flag
+surface.
+
 ## License
 
 [MIT](LICENSE) © 2026 Constantin Razinsky / Uncloned Math
