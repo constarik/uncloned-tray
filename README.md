@@ -6,6 +6,8 @@ binary, no installer, nothing hidden.
 
 Part of the [Uncloned Math](https://uncloned.work) toolset.
 
+![UnclonedTray menu](assets/tray-menu.png)
+
 ---
 
 ## Modules
