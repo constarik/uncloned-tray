@@ -31,7 +31,7 @@ import configparser
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.1.1"
+VERSION  = "0.1.2"
 
 user32   = ctypes.WinDLL("user32",   use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -146,6 +146,13 @@ kernel32.MoveFileExW.argtypes       = [wintypes.LPCWSTR, wintypes.LPCWSTR, winty
 kernel32.GetFileAttributesW.restype = wintypes.DWORD
 kernel32.CreateMutexW.restype       = wintypes.HANDLE
 shell32.Shell_NotifyIconW.argtypes  = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+user32.GetForegroundWindow.restype       = wintypes.HWND
+user32.GetWindowThreadProcessId.restype   = wintypes.DWORD
+user32.GetWindowThreadProcessId.argtypes  = [wintypes.HWND, ctypes.c_void_p]
+user32.AttachThreadInput.argtypes        = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+user32.MapVirtualKeyW.argtypes           = [wintypes.UINT, wintypes.UINT]
+user32.MapVirtualKeyW.restype            = wintypes.UINT
+kernel32.GetCurrentThreadId.restype      = wintypes.DWORD
 
 
 # ----------------------------- config --------------------------------
@@ -210,7 +217,7 @@ class Plugin:
 
 
 class NumLockPlugin(Plugin):
-    Name, Version = "NumLock", "0.2.0"
+    Name, Version = "NumLock", "0.2.1"
 
     MODES    = ["Always On", "Always Off", "On", "Off", "Normal"]
     KEYS     = ["Num", "Caps", "Scroll"]
@@ -227,13 +234,26 @@ class NumLockPlugin(Plugin):
             self.apply(key)
 
     def is_on(self, key):
-        return bool(user32.GetKeyState(VK[key]) & 1)
+        # GetKeyState reflects the CALLING thread's input state, which goes
+        # stale in a background tray process. Attach to the foreground
+        # thread so we read the real, current toggle bit.
+        me  = kernel32.GetCurrentThreadId()
+        fg  = user32.GetForegroundWindow()
+        tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        attached = bool(tid and tid != me and user32.AttachThreadInput(me, tid, True))
+        try:
+            return bool(user32.GetKeyState(VK[key]) & 1)
+        finally:
+            if attached:
+                user32.AttachThreadInput(me, tid, False)
 
     def set_toggle(self, key, want_on):
         if self.is_on(key) != want_on:
-            vk = VK[key]
-            user32.keybd_event(vk, 0x45, KEYEVENTF_EXTENDEDKEY, 0)
-            user32.keybd_event(vk, 0x45, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+            vk   = VK[key]
+            scan = user32.MapVirtualKeyW(vk, 0)          # real scan code per key
+            ext  = KEYEVENTF_EXTENDEDKEY if key == "Num" else 0
+            user32.keybd_event(vk, scan, ext, 0)
+            user32.keybd_event(vk, scan, ext | KEYEVENTF_KEYUP, 0)
 
     def apply(self, key):
         mode = self.current[key]
