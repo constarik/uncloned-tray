@@ -1,5 +1,8 @@
 # =====================================================================
-#  untray.py  --  UnclonedTray-Py  v0.1.3
+#  untray.py  --  UnclonedTray-Py  v0.1.4
+#  v0.1.4: run log untray.log next to the INI - start/exit, session end,
+#          swallowed wndproc errors, uncaught exceptions, native crashes
+#          (faulthandler); so a vanished process leaves a trace
 #  v0.1.3: KeyLock (ex-NumLock) 0.2.2 - mode chosen in the menu is applied
 #          after the menu closes; menu title "KeyLock" (INI section stays
 #          [NumLock] for AHK compatibility)
@@ -31,10 +34,13 @@ import sys
 import time
 import winreg
 import configparser
+import atexit
+import faulthandler
+import traceback
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.1.3"
+VERSION  = "0.1.4"
 
 user32   = ctypes.WinDLL("user32",   use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -596,11 +602,18 @@ class TrayHost:
                 # Explorer restarted: the tray area is new, re-add the icon.
                 self.add_tray_icon()
                 return 0
+            if msg == 0x0011:                       # WM_QUERYENDSESSION
+                log("WM_QUERYENDSESSION lparam=0x%X" % (lparam or 0))
+                return 1
+            if msg == 0x0016:                       # WM_ENDSESSION
+                log("WM_ENDSESSION ending=%d lparam=0x%X" % (wparam or 0, lparam or 0))
+                return 0
             if msg == WM_DESTROY:
                 user32.PostQuitMessage(0)
                 return 0
         except Exception:
-            pass          # a wndproc must never propagate into foreign frames
+            log("wndproc error (msg=0x%04X):\n%s" % (msg, traceback.format_exc()))
+            # a wndproc must never propagate into foreign frames
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     # ------------------------- raw input ------------------------------
@@ -792,6 +805,7 @@ class TrayHost:
             user32.DispatchMessageW(ctypes.byref(msg))
 
     def quit(self):
+        log("exit requested from tray menu")
         for p in self.plugins:
             if p.enabled:
                 try:
@@ -806,9 +820,42 @@ class TrayHost:
 TrayHost.MODULES = [NumLockPlugin, KeepAwakePlugin, DownloadsSorterPlugin]
 
 
+# ----------------------------- run log -------------------------------
+
+_LOG = None
+
+def log(text):
+    if not _LOG:
+        return
+    try:
+        _LOG.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text.rstrip() + "\n")
+        _LOG.flush()
+    except Exception:
+        pass
+
+
+def open_log():
+    """untray.log next to the INI; kept under ~1 MB by restarting it."""
+    global _LOG
+    path = os.path.join(os.path.dirname(TrayHost.find_ini()), "untray.log")
+    try:
+        mode = "w" if (os.path.exists(path) and os.path.getsize(path) > 1 << 20) else "a"
+        _LOG = open(path, mode, encoding="utf-8", buffering=1)
+    except OSError:
+        return
+    faulthandler.enable(_LOG)                 # native crashes (access violations)
+    sys.stderr = _LOG                         # pythonw has no console
+    sys.excepthook = lambda t, v, tb: log("uncaught:\n" +
+                                          "".join(traceback.format_exception(t, v, tb)))
+    atexit.register(lambda: log("process exit (pid %d)" % os.getpid()))
+
+
 def main():
+    open_log()
+    log("start v%s pid %d  %s" % (VERSION, os.getpid(), sys.executable))
     kernel32.CreateMutexW(None, False, APP_NAME + "_SingleInstance")
     if ctypes.get_last_error() == 183:            # ERROR_ALREADY_EXISTS
+        log("already running - this instance quits")
         user32.MessageBoxW(None, APP_NAME + " is already running.",
                            APP_NAME, 0x30)        # MB_ICONWARNING
         return

@@ -8,3 +8,5 @@ _*.ini
 
 # python bytecode
 __pycache__/
+# run log
+untray.log
