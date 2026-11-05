@@ -1,5 +1,6 @@
 # =====================================================================
-#  untray.py  --  UnclonedTray-Py  v0.1.4
+#  unclonedtray.py  --  UnclonedTray-Py  v0.1.5
+#  v0.1.5: renamed untray.py/.ico/.log -> unclonedtray.* ("un" read as "uninstall")
 #  v0.1.4: run log untray.log next to the INI - start/exit, session end,
 #          swallowed wndproc errors, uncaught exceptions, native crashes
 #          (faulthandler); so a vanished process leaves a trace
@@ -40,7 +41,7 @@ import traceback
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.1.4"
+VERSION  = "0.1.5"
 
 user32   = ctypes.WinDLL("user32",   use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -645,10 +646,10 @@ class TrayHost:
     # ------------------------- tray icon ------------------------------
 
     def load_app_icon(self):
-        # untray.ico next to the script (multi-size, generated once with
+        # unclonedtray.ico next to the script (multi-size, generated once with
         # Pillow -- NOT a runtime dependency); system default as fallback.
         ico = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "untray.ico")
+                           "unclonedtray.ico")
         if os.path.exists(ico):
             h = user32.LoadImageW(None, ico, IMAGE_ICON, 0, 0,
                                   LR_LOADFROMFILE | LR_DEFAULTSIZE)
@@ -835,9 +836,9 @@ def log(text):
 
 
 def open_log():
-    """untray.log next to the INI; kept under ~1 MB by restarting it."""
+    """unclonedtray.log next to the INI; kept under ~1 MB by restarting it."""
     global _LOG
-    path = os.path.join(os.path.dirname(TrayHost.find_ini()), "untray.log")
+    path = os.path.join(os.path.dirname(TrayHost.find_ini()), "unclonedtray.log")
     try:
         mode = "w" if (os.path.exists(path) and os.path.getsize(path) > 1 << 20) else "a"
         _LOG = open(path, mode, encoding="utf-8", buffering=1)

@@ -82,7 +82,7 @@ The note above stopped being hypothetical the day after it was written: an EDR
 Start Menu shortcuts included — as a package-level reputation verdict on the
 official installer. Not this script's behavior; the runtime as a class.
 
-`python/untray.py` is a second, self-contained implementation of the same host
+`python/unclonedtray.py` is a second, self-contained implementation of the same host
 for exactly that situation:
 
 - pure standard library + `ctypes` — no pip installs, no compiled binaries,
@@ -93,7 +93,7 @@ for exactly that situation:
 - the same `MoveFileExW`-without-replace mover, same categories, same guards;
 - reads the same `UnclonedTray.ini` (shared sections and keys), so a machine
   can switch implementations freely;
-- run with `pythonw.exe python\untray.py`; **Run at startup** writes a single
+- run with `pythonw.exe python\unclonedtray.py`; **Run at startup** writes a single
   HKCU `Run` registry value.
 
 The AutoHotkey version stays primary: its `Always *` modes suppress the key

@@ -1,4 +1,4 @@
-﻿# local runtime config (per-machine settings)
+# local runtime config (per-machine settings)
 UnclonedTray.ini
 
 # probe/scratch files
@@ -9,4 +9,4 @@ _*.ini
 # python bytecode
 __pycache__/
 # run log
-untray.log
+unclonedtray.log
