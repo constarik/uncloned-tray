@@ -14,7 +14,7 @@ Part of the [Uncloned Math](https://uncloned.work) toolset.
 
 | Module | What it does |
 |---|---|
-| **NumLock** | Force or free Num / Caps / Scroll Lock. Five modes per key: Always On, Always Off, On, Off, Normal. `Always *` suppresses key presses entirely. |
+| **KeyLock** (INI section `[NumLock]`) | Force or free Num / Caps / Scroll Lock. Five modes per key: Always On, Always Off, On, Off, Normal. `Always *` suppresses key presses entirely. |
 | **KeepAwake** | Keeps the machine (and optionally the display) awake via `SetThreadExecutionState`. **No synthetic input** — no clicks, no mouse jiggle, no fake keystrokes. Off by default. |
 | **DownloadsSorter** | Sorts loose files in the *root* of Downloads into category subfolders. Subfolders are never touched. |
 

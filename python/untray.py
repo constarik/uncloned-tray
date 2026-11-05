@@ -1,5 +1,8 @@
 # =====================================================================
-#  untray.py  --  UnclonedTray-Py  v0.1.1
+#  untray.py  --  UnclonedTray-Py  v0.1.3
+#  v0.1.3: KeyLock (ex-NumLock) 0.2.2 - mode chosen in the menu is applied
+#          after the menu closes; menu title "KeyLock" (INI section stays
+#          [NumLock] for AHK compatibility)
 #  v0.1.1: custom tray icon (untray.ico via LoadImageW, system fallback)
 #
 #  Python port of UnclonedTray for machines where AutoHotkey is not
@@ -31,7 +34,7 @@ import configparser
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.1.2"
+VERSION  = "0.1.3"
 
 user32   = ctypes.WinDLL("user32",   use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -70,7 +73,8 @@ ES_CONTINUOUS       = 0x80000000
 ES_SYSTEM_REQUIRED  = 0x00000001
 ES_DISPLAY_REQUIRED = 0x00000002
 
-TIMER_SORT, TIMER_ENFORCE = 1, 2
+TIMER_SORT, TIMER_ENFORCE, TIMER_APPLY = 1, 2, 3
+APPLY_DELAY_MS = 150
 SORT_INTERVAL_MS = 30000
 ENFORCE_DELAY_MS = 30
 
@@ -150,6 +154,8 @@ user32.GetForegroundWindow.restype       = wintypes.HWND
 user32.GetWindowThreadProcessId.restype   = wintypes.DWORD
 user32.GetWindowThreadProcessId.argtypes  = [wintypes.HWND, ctypes.c_void_p]
 user32.AttachThreadInput.argtypes        = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+user32.FindWindowW.restype  = wintypes.HWND
+user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 user32.MapVirtualKeyW.argtypes           = [wintypes.UINT, wintypes.UINT]
 user32.MapVirtualKeyW.restype            = wintypes.UINT
 kernel32.GetCurrentThreadId.restype      = wintypes.DWORD
@@ -201,6 +207,11 @@ class Config:
 
 class Plugin:
     Name, Version = "?", "?"
+    Title = None          # menu/UI caption; defaults to Name
+
+    @property
+    def caption(self):
+        return self.Title or self.Name
 
     def __init__(self, host):
         self.host = host
@@ -213,11 +224,12 @@ class Plugin:
     def status(self): return ""
 
     def notify(self, text):
-        self.host.balloon(self.Name, text)
+        self.host.balloon(self.caption, text)
 
 
 class NumLockPlugin(Plugin):
-    Name, Version = "NumLock", "0.2.1"
+    Name, Version = "NumLock", "0.2.2"     # Name = INI section (shared with AHK)
+    Title = "KeyLock"
 
     MODES    = ["Always On", "Always Off", "On", "Off", "Normal"]
     KEYS     = ["Num", "Caps", "Scroll"]
@@ -240,6 +252,11 @@ class NumLockPlugin(Plugin):
         me  = kernel32.GetCurrentThreadId()
         fg  = user32.GetForegroundWindow()
         tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        if not tid or tid == me:
+            # our own window (tray menu) is foreground: our thread state is
+            # stale, read through the taskbar thread instead
+            tray = user32.FindWindowW("Shell_TrayWnd", None)
+            tid = user32.GetWindowThreadProcessId(tray, None) if tray else 0
         attached = bool(tid and tid != me and user32.AttachThreadInput(me, tid, True))
         try:
             return bool(user32.GetKeyState(VK[key]) & 1)
@@ -279,9 +296,17 @@ class NumLockPlugin(Plugin):
         user32.SetTimer(self.host.hwnd, TIMER_ENFORCE, ENFORCE_DELAY_MS, None)
 
     def select_mode(self, key, mode):
+        # Applied only after the menu has closed and focus went back to
+        # the previous window -- inside the menu the toggle state is stale.
         self.current[key] = mode
-        self.apply(key)
         self.cfg.set_val(self.Name, key, mode)
+        self.pending = getattr(self, "pending", set()) | {key}
+        user32.SetTimer(self.host.hwnd, TIMER_APPLY, APPLY_DELAY_MS, None)
+
+    def apply_pending(self):
+        for key in getattr(self, "pending", set()):
+            self.apply(key)
+        self.pending = set()
 
     def build_menu(self, menu):
         for key in self.KEYS:
@@ -558,6 +583,11 @@ class TrayHost:
                     p = self.by_name("NumLock")
                     if p and p.enabled:
                         p.enforce()
+                elif wparam == TIMER_APPLY:
+                    user32.KillTimer(hwnd, TIMER_APPLY)
+                    p = self.by_name("NumLock")
+                    if p and p.enabled:
+                        p.apply_pending()
                 return 0
             if msg == WM_INPUT:
                 self.handle_raw_input(lparam)
@@ -667,7 +697,7 @@ class TrayHost:
                 self.add_sep(sub)
             self.add_item(sub, "Enabled",
                           (lambda pp=p: self.toggle_module(pp)), p.enabled)
-            self.add_submenu(root, p.Name, sub)
+            self.add_submenu(root, p.caption, sub)
         self.add_sep(root)
         self.add_item(root, "Run at startup", self.toggle_autostart,
                       Autostart.is_enabled())
@@ -708,7 +738,7 @@ class TrayHost:
                 return
         self.cfg.set_val(p.Name, "Enabled", p.enabled)
         self.balloon(APP_NAME,
-                     f"{p.Name}: {'enabled' if p.enabled else 'disabled'}")
+                     f"{p.caption}: {'enabled' if p.enabled else 'disabled'}")
 
     def toggle_autostart(self):
         on = Autostart.toggle()
@@ -719,7 +749,7 @@ class TrayHost:
                  "Python port of UnclonedTray: pure stdlib + ctypes,",
                  "no keyboard hooks, no compiled binaries.", "", "Modules:"]
         for p in self.plugins:
-            line = (f"  {p.Name}  v{p.Version}  -- "
+            line = (f"  {p.caption}  v{p.Version}  -- "
                     f"{'enabled' if p.enabled else 'disabled'}")
             if p.enabled:
                 st = p.status()
@@ -751,7 +781,7 @@ class TrayHost:
         # NumLock module being enabled. Registration alone is passive.
         self.register_raw_input()
         self.add_tray_icon()
-        active = ", ".join(p.Name for p in self.plugins if p.enabled)
+        active = ", ".join(p.caption for p in self.plugins if p.enabled)
         self.balloon(f"{APP_NAME} v{VERSION}",
                      "Active: " + (active or "no modules"))
 
