@@ -1,5 +1,9 @@
 # =====================================================================
-#  unclonedtray.py  --  UnclonedTray-Py  v0.1.6
+#  unclonedtray.py  --  UnclonedTray-Py  v0.1.7
+#  v0.1.7: KeyLock 0.2.4 - after its own corrective key press KeyLock waits
+#          SETTLE_MS and ignores the raw events of that press; re-reading
+#          at once returned the stale pre-press state and flipped the key
+#          again, leaving it in a random position
 #  v0.1.6: KeyLock 0.2.3 - 1 s poll re-asserts Always On/Off even when a
 #          toggle changed without a physical lock-key press (KVM, injected
 #          input, resume); every toggle change, raw lock-key event and
@@ -45,7 +49,7 @@ import traceback
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.1.6"
+VERSION  = "0.1.7"
 
 user32   = ctypes.WinDLL("user32",   use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -86,6 +90,7 @@ ES_DISPLAY_REQUIRED = 0x00000002
 
 TIMER_SORT, TIMER_ENFORCE, TIMER_APPLY, TIMER_POLL = 1, 2, 3, 4
 POLL_INTERVAL_MS = 1000
+SETTLE_MS = 500
 APPLY_DELAY_MS = 150
 SORT_INTERVAL_MS = 30000
 ENFORCE_DELAY_MS = 30
@@ -241,7 +246,7 @@ class Plugin:
 
 
 class NumLockPlugin(Plugin):
-    Name, Version = "NumLock", "0.2.3"     # Name = INI section (shared with AHK)
+    Name, Version = "NumLock", "0.2.4"     # Name = INI section (shared with AHK)
     Title = "KeyLock"
 
     MODES    = ["Always On", "Always Off", "On", "Off", "Normal"]
@@ -306,7 +311,9 @@ class NumLockPlugin(Plugin):
         vk   = VK[key]
         scan = user32.MapVirtualKeyW(vk, 0)          # real scan code per key
         ext  = KEYEVENTF_EXTENDEDKEY if key == "Num" else 0
-        self.own_input_until = time.monotonic() + 0.3
+        # the foreground thread needs time to process our press before its
+        # toggle bit is current; until then neither re-read nor react
+        self.own_input_until = time.monotonic() + SETTLE_MS / 1000.0
         user32.keybd_event(vk, scan, ext, 0)
         user32.keybd_event(vk, scan, ext | KEYEVENTF_KEYUP, 0)
 
@@ -329,6 +336,8 @@ class NumLockPlugin(Plugin):
         # Runs once a second ("poll") and ENFORCE_DELAY_MS after a lock key
         # was touched ("key"). Logs every toggle change and puts Always
         # On/Off keys back, whoever flipped them.
+        if time.monotonic() < self.own_input_until:
+            return          # our own press is still settling
         me, fg, tid = self._fg()
         if tid == me:
             return          # our own menu is foreground: toggle state is stale
@@ -364,7 +373,9 @@ class NumLockPlugin(Plugin):
         self.poll("key")
 
     def on_lock_key(self, vkey, flags=0, hdev=1):
-        if not (flags & 1) and time.monotonic() > self.own_input_until:
+        if time.monotonic() < self.own_input_until:
+            return          # raw events of our own corrective press
+        if not (flags & 1):
             name = next((self.LABEL[k] for k in self.KEYS if VK[k] == vkey), hex(vkey))
             log("KeyLock: %s key down, %s" % (
                 name, "keyboard" if hdev else "INJECTED (no device)"))
