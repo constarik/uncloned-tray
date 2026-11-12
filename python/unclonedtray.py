@@ -1,5 +1,9 @@
 # =====================================================================
-#  unclonedtray.py  --  UnclonedTray-Py  v0.1.7
+#  unclonedtray.py  --  UnclonedTray-Py  v0.1.8
+#  v0.1.8: KeyLock 0.2.5 - Caps Lock is also switched off with Shift: with
+#          the Windows option "turn off Caps Lock with the SHIFT key" a
+#          Caps press only switches it ON, so Always Off never worked;
+#          the method that worked is remembered
 #  v0.1.7: KeyLock 0.2.4 - after its own corrective key press KeyLock waits
 #          SETTLE_MS and ignores the raw events of that press; re-reading
 #          at once returned the stale pre-press state and flipped the key
@@ -49,7 +53,7 @@ import traceback
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.1.7"
+VERSION  = "0.1.8"
 
 user32   = ctypes.WinDLL("user32",   use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -246,7 +250,7 @@ class Plugin:
 
 
 class NumLockPlugin(Plugin):
-    Name, Version = "NumLock", "0.2.4"     # Name = INI section (shared with AHK)
+    Name, Version = "NumLock", "0.2.5"     # Name = INI section (shared with AHK)
     Title = "KeyLock"
 
     MODES    = ["Always On", "Always Off", "On", "Off", "Normal"]
@@ -258,6 +262,8 @@ class NumLockPlugin(Plugin):
         self.current = {}
         self.last = {}             # last seen toggle state per key
         self.fails = {}            # consecutive corrections that did not stick
+        self.off_with_shift = False  # Caps goes off with Shift (learned)
+        self.method = "key"
         self.own_input_until = 0.0 # our own injected presses are not logged
         for key in self.KEYS:
             mode = self.cfg.get_str(self.Name, key, self.DEFAULTS[key])
@@ -307,9 +313,10 @@ class NumLockPlugin(Plugin):
         user32.GetWindowTextW(fg, buf, 80)
         return buf.value or "-"
 
-    def press(self, key):
-        vk   = VK[key]
+    def press(self, key, shift=False):
+        vk   = 0xA0 if shift else VK[key]            # VK_LSHIFT
         scan = user32.MapVirtualKeyW(vk, 0)          # real scan code per key
+        self.method = "Shift" if shift else "key"
         ext  = KEYEVENTF_EXTENDEDKEY if key == "Num" else 0
         # the foreground thread needs time to process our press before its
         # toggle bit is current; until then neither re-read nor react
@@ -319,10 +326,13 @@ class NumLockPlugin(Plugin):
 
     def set_toggle(self, key, want_on, why="apply"):
         if self.is_on(key) != want_on:
-            log("KeyLock: %s forced %s (%s, mode %s)" % (
-                self.LABEL[key], "ON" if want_on else "OFF", why, self.current[key]))
-            self.press(key)
+            shift = key == "Caps" and not want_on and self.off_with_shift
+            log("KeyLock: %s forced %s (%s, mode %s, via %s)" % (
+                self.LABEL[key], "ON" if want_on else "OFF", why, self.current[key],
+                "Shift" if shift else "key"))
+            self.press(key, shift)
             self.last[key] = want_on
+            self.fails[key] = 1
 
     def apply(self, key):
         mode = self.current[key]
@@ -351,6 +361,8 @@ class NumLockPlugin(Plugin):
             mode = self.current[key]
             want = True if mode == "Always On" else False if mode == "Always Off" else None
             if want is None or on == want:
+                if self.fails.get(key) and key == "Caps" and want is False:
+                    self.off_with_shift = (self.method == "Shift")
                 self.fails[key] = 0
                 continue
             n = self.fails.get(key, 0)
@@ -364,9 +376,13 @@ class NumLockPlugin(Plugin):
                     self.fails[key] = 4
                 continue
             self.fails[key] = n + 1
-            log("KeyLock: %s forced %s (%s, mode %s)" % (
-                self.LABEL[key], "ON" if want else "OFF", src, mode))
-            self.press(key)
+            # Caps OFF: alternate between the Caps key and Shift, starting
+            # with whichever worked last time
+            shift = key == "Caps" and not want and (self.off_with_shift != (n % 2 == 1))
+            log("KeyLock: %s forced %s (%s, mode %s, via %s)" % (
+                self.LABEL[key], "ON" if want else "OFF", src, mode,
+                "Shift" if shift else "key"))
+            self.press(key, shift)
             self.last[key] = want
 
     def enforce(self):
