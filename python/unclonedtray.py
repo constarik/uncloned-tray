@@ -1,5 +1,9 @@
 # =====================================================================
-#  unclonedtray.py  --  UnclonedTray-Py  v0.1.5
+#  unclonedtray.py  --  UnclonedTray-Py  v0.1.6
+#  v0.1.6: KeyLock 0.2.3 - 1 s poll re-asserts Always On/Off even when a
+#          toggle changed without a physical lock-key press (KVM, injected
+#          input, resume); every toggle change, raw lock-key event and
+#          forced correction goes to the run log
 #  v0.1.5: renamed untray.py/.ico/.log -> unclonedtray.* ("un" read as "uninstall")
 #  v0.1.4: run log untray.log next to the INI - start/exit, session end,
 #          swallowed wndproc errors, uncaught exceptions, native crashes
@@ -41,7 +45,7 @@ import traceback
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.1.5"
+VERSION  = "0.1.6"
 
 user32   = ctypes.WinDLL("user32",   use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -80,7 +84,8 @@ ES_CONTINUOUS       = 0x80000000
 ES_SYSTEM_REQUIRED  = 0x00000001
 ES_DISPLAY_REQUIRED = 0x00000002
 
-TIMER_SORT, TIMER_ENFORCE, TIMER_APPLY = 1, 2, 3
+TIMER_SORT, TIMER_ENFORCE, TIMER_APPLY, TIMER_POLL = 1, 2, 3, 4
+POLL_INTERVAL_MS = 1000
 APPLY_DELAY_MS = 150
 SORT_INTERVAL_MS = 30000
 ENFORCE_DELAY_MS = 30
@@ -163,6 +168,7 @@ user32.GetWindowThreadProcessId.argtypes  = [wintypes.HWND, ctypes.c_void_p]
 user32.AttachThreadInput.argtypes        = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
 user32.FindWindowW.restype  = wintypes.HWND
 user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.MapVirtualKeyW.argtypes           = [wintypes.UINT, wintypes.UINT]
 user32.MapVirtualKeyW.restype            = wintypes.UINT
 kernel32.GetCurrentThreadId.restype      = wintypes.DWORD
@@ -235,7 +241,7 @@ class Plugin:
 
 
 class NumLockPlugin(Plugin):
-    Name, Version = "NumLock", "0.2.2"     # Name = INI section (shared with AHK)
+    Name, Version = "NumLock", "0.2.3"     # Name = INI section (shared with AHK)
     Title = "KeyLock"
 
     MODES    = ["Always On", "Always Off", "On", "Off", "Normal"]
@@ -245,6 +251,9 @@ class NumLockPlugin(Plugin):
 
     def init(self):
         self.current = {}
+        self.last = {}             # last seen toggle state per key
+        self.fails = {}            # consecutive corrections that did not stick
+        self.own_input_until = 0.0 # our own injected presses are not logged
         for key in self.KEYS:
             mode = self.cfg.get_str(self.Name, key, self.DEFAULTS[key])
             if mode not in self.MODES:          # guard against hand-edited INI
@@ -252,32 +261,61 @@ class NumLockPlugin(Plugin):
             self.current[key] = mode
             self.apply(key)
 
-    def is_on(self, key):
-        # GetKeyState reflects the CALLING thread's input state, which goes
-        # stale in a background tray process. Attach to the foreground
-        # thread so we read the real, current toggle bit.
+    def _fg(self):
         me  = kernel32.GetCurrentThreadId()
         fg  = user32.GetForegroundWindow()
         tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
-        if not tid or tid == me:
-            # our own window (tray menu) is foreground: our thread state is
-            # stale, read through the taskbar thread instead
-            tray = user32.FindWindowW("Shell_TrayWnd", None)
-            tid = user32.GetWindowThreadProcessId(tray, None) if tray else 0
-        attached = bool(tid and tid != me and user32.AttachThreadInput(me, tid, True))
+        return me, fg, tid
+
+    def read_states(self):
+        # GetKeyState reflects the CALLING thread's input state, which goes
+        # stale in a background tray process. Attach to the foreground
+        # thread (or, when that is ourselves or refuses the attach, to the
+        # taskbar thread) and read all three toggle bits under one attach.
+        me, fg, tid = self._fg()
+        cands = []
+        if tid and tid != me:
+            cands.append(tid)
+        tray = user32.FindWindowW("Shell_TrayWnd", None)
+        ttid = user32.GetWindowThreadProcessId(tray, None) if tray else 0
+        if ttid and ttid != me and ttid not in cands:
+            cands.append(ttid)
+        attached = 0
+        for t in cands:
+            if user32.AttachThreadInput(me, t, True):
+                attached = t
+                break
         try:
-            return bool(user32.GetKeyState(VK[key]) & 1)
+            return {k: bool(user32.GetKeyState(VK[k]) & 1) for k in self.KEYS}
         finally:
             if attached:
-                user32.AttachThreadInput(me, tid, False)
+                user32.AttachThreadInput(me, attached, False)
 
-    def set_toggle(self, key, want_on):
+    def is_on(self, key):
+        return self.read_states()[key]
+
+    def fg_title(self):
+        fg = user32.GetForegroundWindow()
+        if not fg:
+            return "-"
+        buf = ctypes.create_unicode_buffer(80)
+        user32.GetWindowTextW(fg, buf, 80)
+        return buf.value or "-"
+
+    def press(self, key):
+        vk   = VK[key]
+        scan = user32.MapVirtualKeyW(vk, 0)          # real scan code per key
+        ext  = KEYEVENTF_EXTENDEDKEY if key == "Num" else 0
+        self.own_input_until = time.monotonic() + 0.3
+        user32.keybd_event(vk, scan, ext, 0)
+        user32.keybd_event(vk, scan, ext | KEYEVENTF_KEYUP, 0)
+
+    def set_toggle(self, key, want_on, why="apply"):
         if self.is_on(key) != want_on:
-            vk   = VK[key]
-            scan = user32.MapVirtualKeyW(vk, 0)          # real scan code per key
-            ext  = KEYEVENTF_EXTENDEDKEY if key == "Num" else 0
-            user32.keybd_event(vk, scan, ext, 0)
-            user32.keybd_event(vk, scan, ext | KEYEVENTF_KEYUP, 0)
+            log("KeyLock: %s forced %s (%s, mode %s)" % (
+                self.LABEL[key], "ON" if want_on else "OFF", why, self.current[key]))
+            self.press(key)
+            self.last[key] = want_on
 
     def apply(self, key):
         mode = self.current[key]
@@ -287,19 +325,49 @@ class NumLockPlugin(Plugin):
             self.set_toggle(key, False)
         # "Normal": leave the current state alone
 
-    def enforce(self):
-        # Runs ENFORCE_DELAY_MS after a lock key was physically touched.
-        # By then the OS has committed the toggle; we simply put it back.
-        # The window in which the wrong state exists is a few tens of ms --
-        # too short for a typed keystroke to land inside it in practice.
+    def poll(self, src):
+        # Runs once a second ("poll") and ENFORCE_DELAY_MS after a lock key
+        # was touched ("key"). Logs every toggle change and puts Always
+        # On/Off keys back, whoever flipped them.
+        me, fg, tid = self._fg()
+        if tid == me:
+            return          # our own menu is foreground: toggle state is stale
+        st = self.read_states()
         for key in self.KEYS:
+            on = st[key]
+            if key in self.last and self.last[key] != on:
+                log("KeyLock: %s %s (%s, fg '%s')" % (
+                    self.LABEL[key], "ON" if on else "OFF", src, self.fg_title()))
+            self.last[key] = on
             mode = self.current[key]
-            if mode == "Always On":
-                self.set_toggle(key, True)
-            elif mode == "Always Off":
-                self.set_toggle(key, False)
+            want = True if mode == "Always On" else False if mode == "Always Off" else None
+            if want is None or on == want:
+                self.fails[key] = 0
+                continue
+            n = self.fails.get(key, 0)
+            if n >= 3:
+                # the reading and reality disagree: stop pressing the key,
+                # otherwise we would flip the real state every second
+                if n == 3:
+                    log("KeyLock: %s does not stay %s after 3 corrections - "
+                        "left alone until it changes" % (
+                            self.LABEL[key], "ON" if want else "OFF"))
+                    self.fails[key] = 4
+                continue
+            self.fails[key] = n + 1
+            log("KeyLock: %s forced %s (%s, mode %s)" % (
+                self.LABEL[key], "ON" if want else "OFF", src, mode))
+            self.press(key)
+            self.last[key] = want
 
-    def on_lock_key(self, vkey):
+    def enforce(self):
+        self.poll("key")
+
+    def on_lock_key(self, vkey, flags=0, hdev=1):
+        if not (flags & 1) and time.monotonic() > self.own_input_until:
+            name = next((self.LABEL[k] for k in self.KEYS if VK[k] == vkey), hex(vkey))
+            log("KeyLock: %s key down, %s" % (
+                name, "keyboard" if hdev else "INJECTED (no device)"))
         user32.SetTimer(self.host.hwnd, TIMER_ENFORCE, ENFORCE_DELAY_MS, None)
 
     def select_mode(self, key, mode):
@@ -585,6 +653,10 @@ class TrayHost:
                     p = self.by_name("DownloadsSorter")
                     if p and p.enabled:
                         p.run_sort(False)
+                elif wparam == TIMER_POLL:
+                    p = self.by_name("NumLock")
+                    if p and p.enabled:
+                        p.poll("poll")
                 elif wparam == TIMER_ENFORCE:
                     user32.KillTimer(hwnd, TIMER_ENFORCE)
                     p = self.by_name("NumLock")
@@ -641,7 +713,8 @@ class TrayHost:
         if ri.keyboard.VKey in (VK["Num"], VK["Caps"], VK["Scroll"]):
             p = self.by_name("NumLock")
             if p and p.enabled:
-                p.on_lock_key(ri.keyboard.VKey)
+                p.on_lock_key(ri.keyboard.VKey, ri.keyboard.Flags,
+                              ri.header.hDevice)
 
     # ------------------------- tray icon ------------------------------
 
@@ -794,6 +867,7 @@ class TrayHost:
         # Registered unconditionally; the WM_INPUT handler gates on the
         # NumLock module being enabled. Registration alone is passive.
         self.register_raw_input()
+        user32.SetTimer(self.hwnd, TIMER_POLL, POLL_INTERVAL_MS, None)
         self.add_tray_icon()
         active = ", ".join(p.caption for p in self.plugins if p.enabled)
         self.balloon(f"{APP_NAME} v{VERSION}",
