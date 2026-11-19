@@ -1,5 +1,8 @@
 # =====================================================================
-#  unclonedtray.py  --  UnclonedTray-Py  v0.1.8
+#  unclonedtray.py  --  UnclonedTray-Py  v0.1.9
+#  v0.1.9: registers with Restart Manager (RegisterApplicationRestart): an
+#          installer that closes the tray (WM_QUERYENDSESSION lparam=0x1)
+#          can start it again; before, it stayed off until the next logon
 #  v0.1.8: KeyLock 0.2.5 - Caps Lock is also switched off with Shift: with
 #          the Windows option "turn off Caps Lock with the SHIFT key" a
 #          Caps press only switches it ON, so Always Off never worked;
@@ -53,7 +56,7 @@ import traceback
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.1.8"
+VERSION  = "0.1.9"
 
 user32   = ctypes.WinDLL("user32",   use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -170,6 +173,8 @@ kernel32.GetModuleHandleW.restype   = wintypes.HMODULE
 kernel32.MoveFileExW.argtypes       = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
 kernel32.GetFileAttributesW.restype = wintypes.DWORD
 kernel32.CreateMutexW.restype       = wintypes.HANDLE
+kernel32.RegisterApplicationRestart.restype  = ctypes.c_long        # HRESULT
+kernel32.RegisterApplicationRestart.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
 shell32.Shell_NotifyIconW.argtypes  = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
 user32.GetForegroundWindow.restype       = wintypes.HWND
 user32.GetWindowThreadProcessId.restype   = wintypes.DWORD
@@ -952,6 +957,14 @@ def open_log():
     atexit.register(lambda: log("process exit (pid %d)" % os.getpid()))
 
 
+def register_restart():
+    """Let Restart Manager relaunch the tray after an installer closed it."""
+    args = '"%s"' % os.path.abspath(__file__)     # arguments only, exe is implied
+    hr = kernel32.RegisterApplicationRestart(args, 0)
+    log("restart registration %s  %s"
+        % ("ok" if hr == 0 else "FAILED hr=0x%08X" % (hr & 0xFFFFFFFF), args))
+
+
 def main():
     open_log()
     log("start v%s pid %d  %s" % (VERSION, os.getpid(), sys.executable))
@@ -961,6 +974,7 @@ def main():
         user32.MessageBoxW(None, APP_NAME + " is already running.",
                            APP_NAME, 0x30)        # MB_ICONWARNING
         return
+    register_restart()
     host = TrayHost()
     host.start()
     host.run()
