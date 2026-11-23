@@ -1,5 +1,10 @@
 # =====================================================================
-#  unclonedtray.py  --  UnclonedTray-Py  v0.1.9
+#  unclonedtray.py  --  UnclonedTray-Py  v0.1.10
+#  v0.1.10: an installer that closes the tray (WM_QUERYENDSESSION lparam=0x1)
+#          no longer leaves it dead: the tray starts a detached copy of
+#          itself that waits RESPAWN_DELAY_S and then starts normally, and
+#          exits cleanly instead of being killed as hung; the Restart
+#          Manager registration of v0.1.9 alone did not bring it back
 #  v0.1.9: registers with Restart Manager (RegisterApplicationRestart): an
 #          installer that closes the tray (WM_QUERYENDSESSION lparam=0x1)
 #          can start it again; before, it stayed off until the next logon
@@ -47,6 +52,7 @@
 import ctypes
 import os
 import sys
+import subprocess
 import time
 import winreg
 import configparser
@@ -56,7 +62,7 @@ import traceback
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.1.9"
+VERSION  = "0.1.10"
 
 user32   = ctypes.WinDLL("user32",   use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -96,6 +102,7 @@ ES_SYSTEM_REQUIRED  = 0x00000001
 ES_DISPLAY_REQUIRED = 0x00000002
 
 TIMER_SORT, TIMER_ENFORCE, TIMER_APPLY, TIMER_POLL = 1, 2, 3, 4
+TIMER_CLOSE = 5
 POLL_INTERVAL_MS = 1000
 SETTLE_MS = 500
 APPLY_DELAY_MS = 150
@@ -694,6 +701,9 @@ class TrayHost:
                     p = self.by_name("NumLock")
                     if p and p.enabled:
                         p.enforce()
+                elif wparam == TIMER_CLOSE:
+                    user32.KillTimer(hwnd, TIMER_CLOSE)
+                    self.quit("closed by an installer")
                 elif wparam == TIMER_APPLY:
                     user32.KillTimer(hwnd, TIMER_APPLY)
                     p = self.by_name("NumLock")
@@ -708,10 +718,18 @@ class TrayHost:
                 self.add_tray_icon()
                 return 0
             if msg == 0x0011:                       # WM_QUERYENDSESSION
-                log("WM_QUERYENDSESSION lparam=0x%X" % (lparam or 0))
+                lp = (lparam or 0) & 0xFFFFFFFF
+                log("WM_QUERYENDSESSION lparam=0x%X" % lp)
+                if lp == 0x1:                       # ENDSESSION_CLOSEAPP alone: an
+                    spawn_respawn()                 # installer, not logoff/shutdown
+                    user32.SetTimer(hwnd, TIMER_CLOSE, CLOSE_DELAY_MS, None)
                 return 1
             if msg == 0x0016:                       # WM_ENDSESSION
-                log("WM_ENDSESSION ending=%d lparam=0x%X" % (wparam or 0, lparam or 0))
+                log("WM_ENDSESSION ending=%d lparam=0x%X"
+                    % (wparam or 0, (lparam or 0) & 0xFFFFFFFF))
+                if wparam:
+                    user32.KillTimer(hwnd, TIMER_CLOSE)
+                    self.quit("session end")
                 return 0
             if msg == WM_DESTROY:
                 user32.PostQuitMessage(0)
@@ -911,8 +929,11 @@ class TrayHost:
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
 
-    def quit(self):
-        log("exit requested from tray menu")
+    def quit(self, reason="exit requested from tray menu"):
+        if getattr(self, "_quitting", False):
+            return
+        self._quitting = True
+        log(reason if isinstance(reason, str) else "exit requested from tray menu")
         for p in self.plugins:
             if p.enabled:
                 try:
@@ -965,14 +986,50 @@ def register_restart():
         % ("ok" if hr == 0 else "FAILED hr=0x%08X" % (hr & 0xFFFFFFFF), args))
 
 
+RESPAWN_DELAY_S = 90        # the copy left behind waits this long, then starts
+CLOSE_DELAY_MS  = 2000      # own exit after the close request, if no WM_ENDSESSION
+_RESPAWNED = False
+
+
+def spawn_respawn():
+    """An installer is closing the tray: leave a detached copy that waits and
+    then starts normally (it has no window meanwhile, so it is not closed)."""
+    global _RESPAWNED
+    if _RESPAWNED:
+        return
+    script = os.path.abspath(__file__)
+    cmd = [sys.executable, script, "--respawn", str(RESPAWN_DELAY_S)]
+    base = 0x00000008 | 0x00000200          # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    for flags in (base | 0x01000000, base):  # first with CREATE_BREAKAWAY_FROM_JOB
+        try:
+            p = subprocess.Popen(cmd, creationflags=flags, close_fds=True,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL,
+                                 cwd=os.path.dirname(script))
+            _RESPAWNED = True
+            log("respawn scheduled in %d s (pid %d)" % (RESPAWN_DELAY_S, p.pid))
+            return
+        except OSError as e:
+            log("respawn start failed (flags 0x%X): %s" % (flags, e))
+
+
 def main():
     open_log()
+    respawn = 0
+    if "--respawn" in sys.argv:
+        try:
+            respawn = max(1, int(sys.argv[sys.argv.index("--respawn") + 1]))
+        except (IndexError, ValueError):
+            respawn = RESPAWN_DELAY_S
+        log("respawn: pid %d waits %d s" % (os.getpid(), respawn))
+        time.sleep(respawn)
     log("start v%s pid %d  %s" % (VERSION, os.getpid(), sys.executable))
     kernel32.CreateMutexW(None, False, APP_NAME + "_SingleInstance")
     if ctypes.get_last_error() == 183:            # ERROR_ALREADY_EXISTS
         log("already running - this instance quits")
-        user32.MessageBoxW(None, APP_NAME + " is already running.",
-                           APP_NAME, 0x30)        # MB_ICONWARNING
+        if not respawn:
+            user32.MessageBoxW(None, APP_NAME + " is already running.",
+                               APP_NAME, 0x30)    # MB_ICONWARNING
         return
     register_restart()
     host = TrayHost()
