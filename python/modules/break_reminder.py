@@ -2,8 +2,9 @@
 #  break_reminder.py  --  example third-party module for UnclonedTray-Py
 #  v1.0.0
 #
-#  Copy this file into python\modules\ and restart the tray. It shows up
-#  switched off; tick Enabled in its submenu to run it.
+#  Ships in python\modules\ and shows up switched off; tick it in the
+#  tray menu Modules (or Enabled in its own submenu) to run it. Copy it
+#  under another file name - and another Name - to start your own module.
 #
 #  Every N minutes a balloon says it is time to stand up. Shows the whole
 #  plugin API in ~40 lines: identity, settings in the INI, a timer, a

@@ -22,9 +22,10 @@ Each module gets its own tray submenu with an **Enabled** toggle. Settings
 persist in `UnclonedTray.ini` next to the script.
 
 The Python version also loads **third-party modules**: drop a `.py` file into
-`python\modules\` and restart. A new module stays off until you enable it.
-How to write one: [python/MODULES.md](python/MODULES.md), with a working
-example in [python/examples/](python/examples/).
+`python\modules\` and restart. A new module stays off until you tick it in
+the tray menu **Modules**. How to write one: [python/MODULES.md](python/MODULES.md);
+a working example, [break_reminder.py](python/modules/break_reminder.py),
+ships in that folder switched off.
 
 ## Why a host instead of separate scripts
 

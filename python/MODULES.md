@@ -4,8 +4,17 @@ Plugin API **1**. A module is one `.py` file in `python\modules\`. The host
 finds it at start. A new module stays **off** until the user ticks *Enabled*
 in its submenu, so foreign code never runs without the user agreeing.
 
-Start from [`examples/break_reminder.py`](examples/break_reminder.py): copy it
-into `python\modules\`, restart the tray, enable it.
+## Adding a module
+
+1. Put its `.py` file into `python\modules\` (tray menu → *Modules* →
+   *Open modules folder*).
+2. Restart the tray.
+3. Tray menu → *Modules* → tick it. A file that did not load is shown there
+   greyed out with the reason.
+
+The example [`modules/break_reminder.py`](modules/break_reminder.py) ships in
+that folder, switched off. To write your own, copy it under a new file name
+and change `Name` (it must be unique), `Title` and `Version`.
 
 ## Skeleton
 

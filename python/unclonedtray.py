@@ -1,5 +1,8 @@
 # =====================================================================
-#  unclonedtray.py  --  UnclonedTray-Py  v0.2.1
+#  unclonedtray.py  --  UnclonedTray-Py  v0.2.2
+#  v0.2.2: example break_reminder.py ships in python\modules\ (off until
+#          ticked), modules\README.txt says how to add one; Modules menu
+#          item "How to add a module" opens MODULES.md
 #  v0.2.1: tray menu "Modules" submenu replaces "Modules folder": every
 #          module with a check mark (click = enable/disable), files that
 #          did not load greyed out with the reason, "Open modules folder"
@@ -87,7 +90,7 @@ import threading
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.2.1"
+VERSION  = "0.2.2"
 CONTACT  = "constr+tray@gmail.com"     # bug reports and feedback
 
 API_VERSION     = 1                    # plugin API; a module must declare the same
@@ -1160,8 +1163,16 @@ class TrayHost:
                 user32.AppendMenuW(sub, MF_STRING | MF_GRAYED, 0,
                                    f"{fname} - not loaded: {why}")
         self.add_sep(sub)
+        self.add_item(sub, "How to add a module", self.open_modules_guide)
         self.add_item(sub, "Open modules folder", self.open_modules_dir)
         return sub
+
+    def open_modules_guide(self):
+        guide = os.path.join(os.path.dirname(os.path.abspath(__file__)), "MODULES.md")
+        if os.path.exists(guide):
+            subprocess.Popen(["notepad.exe", guide])  # .md may have no handler
+        else:
+            os.startfile(f"https://github.com/{HOST_REPO}/blob/main/python/MODULES.md")
 
     # ------------------------- actions --------------------------------
 
