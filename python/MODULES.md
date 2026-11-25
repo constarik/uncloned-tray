@@ -78,3 +78,8 @@ submenu. The host never downloads or replaces files. The user updates by hand.
 A module is ordinary Python with the user's rights. The host does not sandbox
 it. Opt-in and the readable source are the protection, so keep a module
 small enough to read.
+
+## Getting into the official version
+
+Want your module shipped with UnclonedTray? Send it to
+**constr+tray@gmail.com**: the `.py` file and a few words on what it does.

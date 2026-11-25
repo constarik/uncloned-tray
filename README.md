@@ -25,7 +25,8 @@ The Python version also loads **third-party modules**: drop a `.py` file into
 `python\modules\` and restart. A new module stays off until you tick it in
 the tray menu **Modules**. How to write one: [python/MODULES.md](python/MODULES.md);
 a working example, [break_reminder.py](python/modules/break_reminder.py),
-ships in that folder switched off.
+ships in that folder switched off. To get a module into the official version,
+send it to **constr+tray@gmail.com**.
 
 ## Why a host instead of separate scripts
 

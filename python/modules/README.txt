@@ -23,3 +23,8 @@ file name, change Name / Title / Version, and edit. The full guide is
 
 A module is ordinary Python with your rights - the tray does not
 sandbox it. Only add modules whose source you have read.
+
+Want your module in the official version?
+-----------------------------------------
+Send it to constr+tray@gmail.com: the .py file and a few words on
+what it does.
