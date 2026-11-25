@@ -1,5 +1,9 @@
 # =====================================================================
-#  unclonedtray.py  --  UnclonedTray-Py  v0.1.10
+#  unclonedtray.py  --  UnclonedTray-Py  v0.1.11
+#  v0.1.11: menu item "Report a bug" - opens a mail draft to CONTACT with
+#          the versions and the last log lines, and Explorer with the
+#          log selected (a mailto: link cannot attach a file); contact
+#          address and log path in About
 #  v0.1.10: an installer that closes the tray (WM_QUERYENDSESSION lparam=0x1)
 #          no longer leaves it dead: the tray starts a detached copy of
 #          itself that waits RESPAWN_DELAY_S and then starts normally, and
@@ -59,10 +63,12 @@ import configparser
 import atexit
 import faulthandler
 import traceback
+import urllib.parse
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.1.10"
+VERSION  = "0.1.11"
+CONTACT  = "constr+tray@gmail.com"     # bug reports and feedback
 
 user32   = ctypes.WinDLL("user32",   use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -840,6 +846,7 @@ class TrayHost:
                       Autostart.is_enabled())
         self.add_sep(root)
         self.add_item(root, "About", self.show_about)
+        self.add_item(root, "Report a bug", self.report_bug)
         self.add_item(root, "Exit", self.quit)
 
         pt = wintypes.POINT()
@@ -893,8 +900,25 @@ class TrayHost:
                 if st:
                     line += f"  ({st})"
             lines.append(line)
-        lines += ["", f"Config: {self.cfg.path}", "", "Python  |  uncloned.work"]
+        lines += ["", f"Config: {self.cfg.path}", f"Log: {log_path()}", "",
+                  f"Bugs & feedback: {CONTACT}",
+                  "(menu \"Report a bug\" opens a mail draft; attach the log)",
+                  "", "Python  |  uncloned.work"]
         self.msgbox("\n".join(lines))
+
+    def report_bug(self):
+        # A mailto: link cannot attach a file: the draft carries the versions
+        # and the last log lines, Explorer opens with the log selected.
+        path = log_path()
+        try:
+            os.startfile(bug_report_url(self.plugins))
+            log("bug report: mail draft opened")
+        except OSError as e:
+            log("bug report: no mail draft (%s)" % e)
+            self.msgbox(f"Could not open a mail draft.\n\nWrite to {CONTACT}: "
+                        f"what happened, and attach\n{path}")
+        if os.path.exists(path):
+            subprocess.Popen('explorer /select,"%s"' % path)
 
     def msgbox(self, text):
         user32.MessageBoxW(None, text, APP_NAME, 0x40)   # MB_ICONINFORMATION
@@ -962,10 +986,47 @@ def log(text):
         pass
 
 
+def log_path():
+    return os.path.join(os.path.dirname(TrayHost.find_ini()), "unclonedtray.log")
+
+
+REPORT_LOG_LINES = 15       # log tail quoted in the bug-report draft
+REPORT_URL_MAX   = 2000     # longer mailto: links are cut or refused by the shell
+
+
+def bug_report_url(plugins):
+    """mailto: link for a bug report - versions and the log tail in the body."""
+    try:
+        with open(log_path(), encoding="utf-8", errors="replace") as f:
+            tail = [ln.rstrip() for ln in f.readlines()[-REPORT_LOG_LINES:]]
+    except OSError:
+        tail = []
+    wv = sys.getwindowsversion()
+    head = ["What happened:", "", "", "",
+            "Please attach unclonedtray.log (Explorer has opened with it selected).",
+            "",
+            f"{APP_NAME} v{VERSION}",
+            "Modules: " + ", ".join(
+                f"{p.caption} {p.Version} {'on' if p.enabled else 'off'}"
+                for p in plugins),
+            f"Windows {wv.major}.{wv.minor} build {wv.build}, "
+            f"Python {sys.version.split()[0]}",
+            ""]
+    to = urllib.parse.quote(CONTACT, safe="@")     # "+" must travel as %2B
+    subject = urllib.parse.quote(f"{APP_NAME} v{VERSION} bug")
+    while True:
+        body = head + ([f"Last {len(tail)} log lines:"] + tail if tail else [])
+        url = "mailto:%s?subject=%s&body=%s" % (
+            to, subject, urllib.parse.quote("\r\n".join(body)))
+        if len(url) <= REPORT_URL_MAX or not tail:
+            return url
+        tail = tail[1:]                       # drop the oldest line until it fits
+
+
 def open_log():
     """unclonedtray.log next to the INI; kept under ~1 MB by restarting it."""
     global _LOG
-    path = os.path.join(os.path.dirname(TrayHost.find_ini()), "unclonedtray.log")
+    path = log_path()
     try:
         mode = "w" if (os.path.exists(path) and os.path.getsize(path) > 1 << 20) else "a"
         _LOG = open(path, mode, encoding="utf-8", buffering=1)

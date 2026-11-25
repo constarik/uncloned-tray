@@ -101,6 +101,21 @@ press outright via a native hook, which the port deliberately does not attempt.
 The trade is a few tens of milliseconds of toggle-and-revert for a zero-flag
 surface.
 
+## Bugs and feedback
+
+Write to **constr+tray@gmail.com**: a couple of sentences on what happened,
+plus the run log `unclonedtray.log` (it sits next to `UnclonedTray.ini`).
+
+In the Python version, **Report a bug** in the tray menu prepares both: a mail
+draft with the versions and the last 15 log lines, and an Explorer window with
+the log selected, ready to attach — a `mailto:` link cannot attach a file
+itself.
+
+What the log holds: start and exit, session-end and installer close requests,
+lock-key changes together with the title of the window that was in the
+foreground, and Python tracebacks, which include file paths (and so the Windows
+user name). Nothing leaves the machine unless you send the mail.
+
 ## License
 
 [MIT](LICENSE) © 2026 Constantin Razinsky / Uncloned Math
