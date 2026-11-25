@@ -53,7 +53,8 @@ into `plugins/` does nothing on its own.
 ## Install
 
 1. Install [AutoHotkey **v2**](https://www.autohotkey.com/) (v1 will not work).
-2. Clone or download this repo.
+2. Download the zip from the [latest release](https://github.com/constarik/uncloned-tray/releases/latest)
+   and unpack it anywhere (or clone this repo).
 3. Run `UnclonedTray.ahk`.
 4. Tick **Run at startup** in the tray menu if wanted — it creates a single
    shortcut in your user Startup folder. No admin rights required.
@@ -100,7 +101,8 @@ for exactly that situation:
 - the same `MoveFileExW`-without-replace mover, same categories, same guards;
 - reads the same `UnclonedTray.ini` (shared sections and keys), so a machine
   can switch implementations freely;
-- run with `pythonw.exe python\unclonedtray.py`; **Run at startup** writes a single
+- download the zip from the [latest release](https://github.com/constarik/uncloned-tray/releases/latest),
+  run with `pythonw.exe python\unclonedtray.py`; **Run at startup** writes a single
   HKCU `Run` registry value;
 - real drop-in modules (plugin API 1): files in `python\modules\`, off until
   enabled, every call into a module guarded. A module that keeps failing is
