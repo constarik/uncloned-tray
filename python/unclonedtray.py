@@ -1,5 +1,12 @@
 # =====================================================================
-#  unclonedtray.py  --  UnclonedTray-Py  v0.1.12
+#  unclonedtray.py  --  UnclonedTray-Py  v0.2.0
+#  v0.2.0: plugin API 1 - third-party modules are .py files in
+#          python\modules\ (see python\MODULES.md), found at start, off
+#          until the user enables them; module timers and Raw Input go
+#          through the host, every module callback is guarded (5 errors
+#          in a session disable the module, the rest keeps running);
+#          optional daily update check against GitHub Releases for the
+#          host and for modules that name their repo (off by default)
 #  v0.1.12: "Report a bug" no longer depends on the mail draft (a PC whose
 #          mailto: handler is a browser without a mail service shows
 #          nothing): the report text goes to the clipboard and a message
@@ -68,11 +75,23 @@ import atexit
 import faulthandler
 import traceback
 import urllib.parse
+import urllib.request
+import urllib.error
+import importlib.util
+import json
+import re
+import threading
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.1.12"
+VERSION  = "0.2.0"
 CONTACT  = "constr+tray@gmail.com"     # bug reports and feedback
+
+API_VERSION     = 1                    # plugin API; a module must declare the same
+MODULES_DIR     = "modules"            # third-party modules, next to this script
+HOST_REPO       = "constarik/uncloned-tray"
+HOST_TAG_PREFIX = "py-v"               # release tags of this implementation
+MAX_MODULE_ERRORS = 5                  # per session, then the module is disabled
 
 user32   = ctypes.WinDLL("user32",   use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -86,6 +105,7 @@ WM_TIMER     = 0x0113
 WM_INPUT     = 0x00FF
 WM_APP       = 0x8000
 WM_TRAY      = WM_APP + 1
+WM_UPDATES   = WM_APP + 2              # update check finished (posted by its thread)
 WM_LBUTTONUP = 0x0202
 WM_RBUTTONUP = 0x0205
 
@@ -111,8 +131,13 @@ ES_CONTINUOUS       = 0x80000000
 ES_SYSTEM_REQUIRED  = 0x00000001
 ES_DISPLAY_REQUIRED = 0x00000002
 
-TIMER_SORT, TIMER_ENFORCE, TIMER_APPLY, TIMER_POLL = 1, 2, 3, 4
-TIMER_CLOSE = 5
+TIMER_CLOSE   = 5                      # host timers; module timers start at
+TIMER_UPDATES = 6                      # MODULE_TIMER_BASE, allocated by the host
+MODULE_TIMER_BASE = 100
+UPDATE_FIRST_MS   = 60_000             # first check a minute after start
+UPDATE_TICK_MS    = 600_000            # then look every 10 min whether a day passed
+UPDATE_INTERVAL_S = 86_400
+UPDATE_TIMEOUT_S  = 15
 POLL_INTERVAL_MS = 1000
 SETTLE_MS = 500
 APPLY_DELAY_MS = 150
@@ -182,6 +207,8 @@ user32.SetTimer.restype         = ctypes.c_size_t
 user32.SetTimer.argtypes        = [wintypes.HWND, ctypes.c_size_t,
                                    wintypes.UINT, ctypes.c_void_p]
 user32.KillTimer.argtypes       = [wintypes.HWND, ctypes.c_size_t]
+user32.PostMessageW.argtypes    = [wintypes.HWND, wintypes.UINT,
+                                   wintypes.WPARAM, wintypes.LPARAM]
 user32.GetKeyState.restype      = ctypes.c_short
 user32.GetRawInputData.restype  = wintypes.UINT
 user32.GetRawInputData.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p,
@@ -259,8 +286,19 @@ class Config:
 # ----------------------------- plugins -------------------------------
 
 class Plugin:
-    Name, Version = "?", "?"
-    Title = None          # menu/UI caption; defaults to Name
+    """Base class of every module, built-in or third-party (python\\MODULES.md).
+
+    A module declares who it is (class attributes) and overrides the hooks
+    it needs. It never touches the tray, the window or timers directly:
+    the host owns them and calls the module, catching whatever it raises."""
+
+    Name, Version = "?", "?"      # Name = INI section; unique across modules
+    Title      = None             # menu/UI caption; defaults to Name
+    Author     = ""
+    Repo       = ""               # "owner/repo" on GitHub: update check (third-party)
+    TagPrefix  = "v"              # release tags of that repo: <prefix><version>
+    ApiVersion = API_VERSION      # must equal the host's API_VERSION to load
+    RawKeys    = ()               # virtual-key codes whose Raw Input it wants
 
     @property
     def caption(self):
@@ -270,19 +308,37 @@ class Plugin:
         self.host = host
         self.cfg = host.cfg
         self.enabled = True
+        self.builtin = True       # set by the host
+        self.source = ""          # file of a third-party module
+        self.errors = 0           # guarded-callback failures this session
 
-    def init(self): pass
-    def shutdown(self): pass
-    def build_menu(self, menu): pass
-    def status(self): return ""
+    # --- hooks ----------------------------------------------------------
+    def init(self): pass                          # enabled: start working
+    def shutdown(self): pass                      # disabled or exit: release
+    def build_menu(self, menu): pass              # fill own submenu (host.add_*)
+    def status(self): return ""                   # one line for About
+    def on_raw_key(self, vkey, flags, hdev): pass # a key from RawKeys was touched
 
+    # --- host services ------------------------------------------------------
     def notify(self, text):
         self.host.balloon(self.caption, text)
 
+    def log(self, text):
+        log("%s: %s" % (self.caption, text))
+
+    def set_timer(self, name, ms, fn, once=False):
+        """Call fn every ms (once=True: a single time). Re-arming the same
+        name restarts it. All timers of a module stop when it is disabled."""
+        self.host.set_timer(self, name, ms, fn, once)
+
+    def kill_timer(self, name):
+        self.host.kill_timer(self, name)
+
 
 class NumLockPlugin(Plugin):
-    Name, Version = "NumLock", "0.2.5"     # Name = INI section (shared with AHK)
+    Name, Version = "NumLock", "0.2.6"     # Name = INI section (shared with AHK)
     Title = "KeyLock"
+    RawKeys = (VK["Num"], VK["Caps"], VK["Scroll"])
 
     MODES    = ["Always On", "Always Off", "On", "Off", "Normal"]
     KEYS     = ["Num", "Caps", "Scroll"]
@@ -302,6 +358,7 @@ class NumLockPlugin(Plugin):
                 mode = self.DEFAULTS[key]
             self.current[key] = mode
             self.apply(key)
+        self.set_timer("poll", POLL_INTERVAL_MS, lambda: self.poll("poll"))
 
     def _fg(self):
         me  = kernel32.GetCurrentThreadId()
@@ -419,14 +476,14 @@ class NumLockPlugin(Plugin):
     def enforce(self):
         self.poll("key")
 
-    def on_lock_key(self, vkey, flags=0, hdev=1):
+    def on_raw_key(self, vkey, flags=0, hdev=1):
         if time.monotonic() < self.own_input_until:
             return          # raw events of our own corrective press
         if not (flags & 1):
             name = next((self.LABEL[k] for k in self.KEYS if VK[k] == vkey), hex(vkey))
             log("KeyLock: %s key down, %s" % (
                 name, "keyboard" if hdev else "INJECTED (no device)"))
-        user32.SetTimer(self.host.hwnd, TIMER_ENFORCE, ENFORCE_DELAY_MS, None)
+        self.set_timer("enforce", ENFORCE_DELAY_MS, self.enforce, once=True)
 
     def select_mode(self, key, mode):
         # Applied only after the menu has closed and focus went back to
@@ -434,7 +491,7 @@ class NumLockPlugin(Plugin):
         self.current[key] = mode
         self.cfg.set_val(self.Name, key, mode)
         self.pending = getattr(self, "pending", set()) | {key}
-        user32.SetTimer(self.host.hwnd, TIMER_APPLY, APPLY_DELAY_MS, None)
+        self.set_timer("apply", APPLY_DELAY_MS, self.apply_pending, once=True)
 
     def apply_pending(self):
         for key in getattr(self, "pending", set()):
@@ -499,7 +556,7 @@ class KeepAwakePlugin(Plugin):
 
 
 class DownloadsSorterPlugin(Plugin):
-    Name, Version = "DownloadsSorter", "0.2.0"
+    Name, Version = "DownloadsSorter", "0.2.1"
 
     FRESH_SECONDS = 15         # do not touch files younger than N seconds
     OTHER_FOLDER  = "Other"
@@ -526,15 +583,15 @@ class DownloadsSorterPlugin(Plugin):
                 self.ext_cat[e] = cat
         self.auto = self.cfg.get_bool(self.Name, "Auto", True)
         if self.auto:
-            user32.SetTimer(self.host.hwnd, TIMER_SORT, SORT_INTERVAL_MS, None)
+            self.set_timer("sort", SORT_INTERVAL_MS, lambda: self.run_sort(False))
 
     def toggle_auto(self):
         self.auto = not self.auto
         self.cfg.set_val(self.Name, "Auto", self.auto)
         if self.auto:
-            user32.SetTimer(self.host.hwnd, TIMER_SORT, SORT_INTERVAL_MS, None)
+            self.set_timer("sort", SORT_INTERVAL_MS, lambda: self.run_sort(False))
         else:
-            user32.KillTimer(self.host.hwnd, TIMER_SORT)
+            self.kill_timer("sort")
         self.notify("Auto-watch: " + ("ON" if self.auto else "OFF"))
 
     def downloads_path(self):
@@ -614,9 +671,6 @@ class DownloadsSorterPlugin(Plugin):
         self.host.add_item(menu, "Show folder",
                            lambda: os.startfile(self.downloads_path()))
 
-    def shutdown(self):
-        user32.KillTimer(self.host.hwnd, TIMER_SORT)
-
     def status(self):
         return "auto" if self.auto else "manual"
 
@@ -663,8 +717,17 @@ class TrayHost:
     def __init__(self):
         self.cfg = Config(self.find_ini())
         self.plugins = []
-        self.actions = {}          # menu command id -> callable
+        self.skipped = []          # third-party files not loaded: (file, reason)
+        self.actions = {}          # menu command id -> (owning module or None, callable)
         self.next_id = 1000
+        self._menu_owner = None    # module whose build_menu is running
+        self.timers = {}           # timer id -> (module, name, fn, once)
+        self.timer_ids = {}        # (module Name, timer name) -> timer id
+        self.next_timer = MODULE_TIMER_BASE
+        self.updates = {}          # "host" or module Name -> (tag, url)
+        self._update_result = None # handed over by the check thread
+        self._update_busy = False
+        self._update_manual = False
         self.hwnd = None
         self.nid = None
         self.taskbar_created = user32.RegisterWindowMessageW("TaskbarCreated")
@@ -707,27 +770,21 @@ class TrayHost:
                     self.show_menu()
                 return 0
             if msg == WM_TIMER:
-                if wparam == TIMER_SORT:
-                    p = self.by_name("DownloadsSorter")
-                    if p and p.enabled:
-                        p.run_sort(False)
-                elif wparam == TIMER_POLL:
-                    p = self.by_name("NumLock")
-                    if p and p.enabled:
-                        p.poll("poll")
-                elif wparam == TIMER_ENFORCE:
-                    user32.KillTimer(hwnd, TIMER_ENFORCE)
-                    p = self.by_name("NumLock")
-                    if p and p.enabled:
-                        p.enforce()
-                elif wparam == TIMER_CLOSE:
+                if wparam == TIMER_CLOSE:
                     user32.KillTimer(hwnd, TIMER_CLOSE)
                     self.quit("closed by an installer")
-                elif wparam == TIMER_APPLY:
-                    user32.KillTimer(hwnd, TIMER_APPLY)
-                    p = self.by_name("NumLock")
-                    if p and p.enabled:
-                        p.apply_pending()
+                elif wparam == TIMER_UPDATES:
+                    user32.SetTimer(hwnd, TIMER_UPDATES, UPDATE_TICK_MS, None)
+                    self.maybe_check_updates()
+                elif wparam in self.timers:
+                    p, name, fn, once = self.timers[wparam]
+                    if once:
+                        self.kill_timer(p, name)
+                    if p.enabled:
+                        self.guarded(p, fn)
+                return 0
+            if msg == WM_UPDATES:
+                self.apply_update_result()
                 return 0
             if msg == WM_INPUT:
                 self.handle_raw_input(lparam)
@@ -779,11 +836,192 @@ class TrayHost:
         ri = ctypes.cast(buf, ctypes.POINTER(RAWINPUT)).contents
         if ri.header.dwType != RIM_TYPEKEYBOARD:
             return
-        if ri.keyboard.VKey in (VK["Num"], VK["Caps"], VK["Scroll"]):
-            p = self.by_name("NumLock")
-            if p and p.enabled:
-                p.on_lock_key(ri.keyboard.VKey, ri.keyboard.Flags,
-                              ri.header.hDevice)
+        vkey = ri.keyboard.VKey
+        for p in self.plugins:
+            if p.enabled and vkey in p.RawKeys:
+                self.guarded(p, p.on_raw_key, vkey, ri.keyboard.Flags,
+                             ri.header.hDevice)
+
+    # ------------------------- module services ------------------------
+
+    def guarded(self, p, fn, *args):
+        """Every call into a module goes through here: an exception is
+        logged with the module's name; after MAX_MODULE_ERRORS in a session
+        the module is switched off, the host and the others keep running."""
+        try:
+            return fn(*args)
+        except Exception:
+            p.errors += 1
+            log("module %s error %d/%d:\n%s" % (p.Name, p.errors, MAX_MODULE_ERRORS,
+                                               traceback.format_exc()))
+            if p.errors >= MAX_MODULE_ERRORS and p.enabled:
+                self.stop_module(p)
+                log("module %s disabled for this session after %d errors"
+                    % (p.Name, p.errors))
+                self.balloon(APP_NAME, f"{p.caption} stopped after repeated "
+                             "errors - see the log")
+            return None
+
+    def stop_module(self, p):
+        try:
+            p.shutdown()
+        except Exception:
+            log("module %s shutdown error:\n%s" % (p.Name, traceback.format_exc()))
+        for (_, name) in [k for k in self.timer_ids if k[0] == p.Name]:
+            self.kill_timer(p, name)
+        p.enabled = False
+
+    def set_timer(self, p, name, ms, fn, once=False):
+        key = (p.Name, name)
+        tid = self.timer_ids.get(key)
+        if tid is None:
+            self.next_timer += 1
+            tid = self.timer_ids[key] = self.next_timer
+        self.timers[tid] = (p, name, fn, once)
+        user32.SetTimer(self.hwnd, tid, int(ms), None)   # same id: re-armed
+
+    def kill_timer(self, p, name):
+        tid = self.timer_ids.get((p.Name, name))
+        if tid is not None:
+            user32.KillTimer(self.hwnd, tid)
+            self.timers.pop(tid, None)
+
+    # ------------------------- third-party modules --------------------
+
+    @staticmethod
+    def modules_dir():
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), MODULES_DIR)
+
+    def load_external(self):
+        """Classes derived from Plugin in python\\modules\\*.py. A module seen
+        for the first time is registered switched off: foreign code runs
+        only after the user ticks Enabled in its submenu."""
+        folder = self.modules_dir()
+        if not os.path.isdir(folder):
+            return []
+        taken = {c.Name for c in TrayHost.MODULES} | {"Updates"}
+        found = []
+        for fname in sorted(os.listdir(folder)):
+            if not fname.endswith(".py") or fname.startswith("_"):
+                continue
+            path = os.path.join(folder, fname)
+            modname = "unclonedtray_ext_" + re.sub(r"\W", "_", fname[:-3])
+            try:
+                spec = importlib.util.spec_from_file_location(modname, path)
+                mod = importlib.util.module_from_spec(spec)
+                sys.modules[modname] = mod
+                spec.loader.exec_module(mod)
+            except Exception as e:
+                sys.modules.pop(modname, None)
+                self.skipped.append((fname, "load error: %s" % e))
+                log("module file %s failed to load:\n%s" % (fname, traceback.format_exc()))
+                continue
+            classes = [c for c in vars(mod).values()
+                       if isinstance(c, type) and issubclass(c, Plugin)
+                       and c is not Plugin and c.__module__ == modname]
+            if not classes:
+                self.skipped.append((fname, "no module class"))
+                continue
+            for cls in classes:
+                why = None
+                declared = any("ApiVersion" in vars(k) for k in cls.__mro__
+                               if k is not Plugin)
+                if not declared:
+                    why = "does not declare ApiVersion"
+                elif cls.ApiVersion != API_VERSION:
+                    why = "needs plugin API %s, host has %s" % (cls.ApiVersion, API_VERSION)
+                elif not cls.Name or cls.Name == "?" or cls.Name in taken:
+                    why = "name '%s' missing or already taken" % cls.Name
+                if why:
+                    self.skipped.append((fname, why))
+                    log("module %s in %s skipped: %s" % (cls.__name__, fname, why))
+                    continue
+                taken.add(cls.Name)
+                found.append((cls, path))
+        return found
+
+    # ------------------------- update check ---------------------------
+
+    def updates_on(self):
+        return self.cfg.get_bool("Updates", "Check", False)
+
+    def update_targets(self):
+        targets = [("host", APP_NAME, HOST_REPO, HOST_TAG_PREFIX, VERSION)]
+        for p in self.plugins:
+            if not p.builtin and p.Repo:
+                targets.append((p.Name, p.caption, p.Repo, p.TagPrefix, p.Version))
+        return targets
+
+    def maybe_check_updates(self):
+        if not self.updates_on():
+            return
+        try:
+            last = float(self.cfg.get_str("Updates", "LastCheck", "0"))
+        except ValueError:
+            last = 0.0
+        if time.time() - last >= UPDATE_INTERVAL_S:
+            self.check_updates(manual=False)
+
+    def check_updates(self, manual=True):
+        """Network work runs in a thread; the result is posted back to the
+        window and applied there (menu, balloons, INI stay single-threaded)."""
+        if self._update_busy:
+            return
+        self._update_busy, self._update_manual = True, manual
+        targets = self.update_targets()
+
+        def work():
+            found, errors = {}, []
+            for key, caption, repo, prefix, current in targets:
+                try:
+                    rel = latest_release(repo, prefix)
+                    if rel and parse_version(rel[0], prefix) > parse_version(current, ""):
+                        found[key] = rel
+                except Exception as e:
+                    errors.append("%s: %s" % (caption, e))
+            self._update_result = (found, errors)
+            user32.PostMessageW(self.hwnd, WM_UPDATES, 0, 0)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def apply_update_result(self):
+        found, errors = self._update_result or ({}, [])
+        self._update_busy = False
+        self.updates = found
+        self.cfg.set_val("Updates", "LastCheck", "%d" % time.time())
+        for e in errors:
+            log("update check: " + e)
+        notified = set(filter(None, self.cfg.get_str("Updates", "Notified", "").split(";")))
+        fresh = []
+        for key, (tag, url) in found.items():
+            mark = "%s=%s" % (key, tag)
+            if self._update_manual or mark not in notified:
+                p = self.by_name(key)
+                fresh.append("%s %s" % (p.caption if p else APP_NAME, tag))
+                notified.add(mark)
+        self.cfg.set_val("Updates", "Notified", ";".join(sorted(notified)))
+        log("update check: %s%s" % (", ".join("%s=%s" % (k, v[0]) for k, v in found.items())
+                                     or "up to date", " (%d errors)" % len(errors) if errors else ""))
+        if fresh:
+            self.balloon(APP_NAME, "Update available: " + ", ".join(fresh)
+                         + "\nTray menu -> Update available")
+        elif self._update_manual:
+            self.balloon(APP_NAME, "Check failed - see the log" if errors and not found
+                         else "Everything is up to date")
+
+    def toggle_updates(self):
+        on = not self.updates_on()
+        self.cfg.set_val("Updates", "Check", on)
+        if on:
+            user32.SetTimer(self.hwnd, TIMER_UPDATES, UPDATE_FIRST_MS, None)
+        else:
+            user32.KillTimer(self.hwnd, TIMER_UPDATES)
+        self.balloon(APP_NAME, "Daily update check: " + ("ON" if on else "OFF"))
+
+    def open_modules_dir(self):
+        folder = self.modules_dir()
+        os.makedirs(folder, exist_ok=True)
+        os.startfile(folder)
 
     # ------------------------- tray icon ------------------------------
 
@@ -827,7 +1065,7 @@ class TrayHost:
 
     def _bind(self, fn):
         self.next_id += 1
-        self.actions[self.next_id] = fn
+        self.actions[self.next_id] = (self._menu_owner, fn)
         return self.next_id
 
     def add_item(self, menu, label, fn, checked=False):
@@ -846,10 +1084,26 @@ class TrayHost:
         self.actions = {}
         self.next_id = 1000
         root = self.new_menu()
+        if "host" in self.updates:
+            tag, url = self.updates["host"]
+            self.add_item(root, f"Update available: {tag}",
+                          lambda u=url: os.startfile(u))
+            self.add_sep(root)
+        third_party = False
         for p in self.plugins:
+            if not p.builtin and not third_party:
+                self.add_sep(root)              # third-party modules below the line
+                third_party = True
             sub = self.new_menu()
+            if p.Name in self.updates:
+                tag, url = self.updates[p.Name]
+                self.add_item(sub, f"Update available: {tag}",
+                              lambda u=url: os.startfile(u))
+                self.add_sep(sub)
             if p.enabled:
-                p.build_menu(sub)
+                self._menu_owner = p
+                self.guarded(p, p.build_menu, sub)
+                self._menu_owner = None
                 self.add_sep(sub)
             self.add_item(sub, "Enabled",
                           (lambda pp=p: self.toggle_module(pp)), p.enabled)
@@ -857,6 +1111,11 @@ class TrayHost:
         self.add_sep(root)
         self.add_item(root, "Run at startup", self.toggle_autostart,
                       Autostart.is_enabled())
+        upd = self.new_menu()
+        self.add_item(upd, "Check daily", self.toggle_updates, self.updates_on())
+        self.add_item(upd, "Check now", self.check_updates)
+        self.add_submenu(root, "Updates", upd)
+        self.add_item(root, "Modules folder", self.open_modules_dir)
         self.add_sep(root)
         self.add_item(root, "About", self.show_about)
         self.add_item(root, "Report a bug", self.report_bug)
@@ -869,8 +1128,10 @@ class TrayHost:
                                     pt.x, pt.y, 0, self.hwnd, None)
         user32.PostMessageW(self.hwnd, 0, 0, 0)  # MS-recommended WM_NULL nudge
         user32.DestroyMenu(root)
-        fn = self.actions.get(cmd)
-        if fn:
+        owner, fn = self.actions.get(cmd, (None, None))
+        if owner:
+            self.guarded(owner, fn)           # a module's own menu item
+        elif fn:
             try:
                 fn()
             except Exception as e:
@@ -880,17 +1141,15 @@ class TrayHost:
 
     def toggle_module(self, p):
         if p.enabled:
-            try:
-                p.shutdown()
-            except Exception:
-                pass
-            p.enabled = False
+            self.stop_module(p)
         else:
             p.enabled = True
+            p.errors = 0
             try:
                 p.init()
             except Exception as e:
-                p.enabled = False
+                log("module %s failed to start:\n%s" % (p.Name, traceback.format_exc()))
+                self.stop_module(p)
                 self.msgbox(f"Module '{p.Name}' failed to start:\n{e}")
                 return
         self.cfg.set_val(p.Name, "Enabled", p.enabled)
@@ -909,11 +1168,18 @@ class TrayHost:
             line = (f"  {p.caption}  v{p.Version}  -- "
                     f"{'enabled' if p.enabled else 'disabled'}")
             if p.enabled:
-                st = p.status()
+                st = self.guarded(p, p.status)
                 if st:
                     line += f"  ({st})"
+            if not p.builtin:
+                line += f"  [third-party: {os.path.basename(p.source)}"
+                line += f", {p.Author}]" if p.Author else "]"
             lines.append(line)
-        lines += ["", f"Config: {self.cfg.path}", f"Log: {log_path()}", "",
+        for fname, why in self.skipped:
+            lines.append(f"  {fname}  -- not loaded: {why}")
+        lines += ["", f"Plugin API {API_VERSION}, modules folder: {self.modules_dir()}",
+                  "Daily update check: " + ("on" if self.updates_on() else "off"),
+                  "", f"Config: {self.cfg.path}", f"Log: {log_path()}", "",
                   f"Bugs & feedback: {CONTACT}",
                   "(menu \"Report a bug\": report text to the clipboard,",
                   " mail draft, log selected in Explorer)",
@@ -956,25 +1222,50 @@ class TrayHost:
 
     def start(self):
         self.create_window()
-        for cls in TrayHost.MODULES:
-            p = cls(self)
-            p.enabled = self.cfg.get_bool(p.Name, "Enabled", True)
+        mods = [(cls, "") for cls in TrayHost.MODULES]
+        builtin_count = len(mods)
+        mods += self.load_external()
+        new_found = []
+        for i, (cls, src) in enumerate(mods):
+            try:
+                p = cls(self)
+            except Exception:
+                self.skipped.append((os.path.basename(src) or cls.__name__,
+                                     "constructor failed"))
+                log("module %s constructor failed:\n%s" % (cls.__name__, traceback.format_exc()))
+                continue
+            p.builtin = i < builtin_count
+            p.source = src
+            if p.builtin:
+                p.enabled = self.cfg.get_bool(p.Name, "Enabled", True)
+            else:
+                if not self.cfg.cp.has_option(p.Name, "Enabled"):
+                    self.cfg.set_val(p.Name, "Enabled", False)   # first sighting
+                    new_found.append(p)
+                    log("new module found: %s %s by %s in %s"
+                        % (p.Name, p.Version, p.Author or "?", src))
+                p.enabled = self.cfg.get_bool(p.Name, "Enabled", False)
             self.plugins.append(p)
             if p.enabled:
                 try:
                     p.init()
                 except Exception as e:
-                    p.enabled = False
+                    log("module %s failed to start:\n%s" % (p.Name, traceback.format_exc()))
+                    self.stop_module(p)
                     self.msgbox(f"Module '{p.Name}' failed to start "
                                 f"and was disabled:\n{e}")
-        # Registered unconditionally; the WM_INPUT handler gates on the
-        # NumLock module being enabled. Registration alone is passive.
+        # Registered unconditionally; WM_INPUT goes only to enabled modules
+        # that list the key in RawKeys. Registration alone is passive.
         self.register_raw_input()
-        user32.SetTimer(self.hwnd, TIMER_POLL, POLL_INTERVAL_MS, None)
+        if self.updates_on():
+            user32.SetTimer(self.hwnd, TIMER_UPDATES, UPDATE_FIRST_MS, None)
         self.add_tray_icon()
         active = ", ".join(p.caption for p in self.plugins if p.enabled)
-        self.balloon(f"{APP_NAME} v{VERSION}",
-                     "Active: " + (active or "no modules"))
+        text = "Active: " + (active or "no modules")
+        if new_found:
+            text += "\nNew module(s), off until enabled: " + ", ".join(
+                p.caption for p in new_found)
+        self.balloon(f"{APP_NAME} v{VERSION}", text)
 
     def run(self):
         msg = wintypes.MSG()
@@ -989,10 +1280,7 @@ class TrayHost:
         log(reason if isinstance(reason, str) else "exit requested from tray menu")
         for p in self.plugins:
             if p.enabled:
-                try:
-                    p.shutdown()
-                except Exception:
-                    pass
+                self.stop_module(p)
         if self.nid:
             shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self.nid))
         user32.DestroyWindow(self.hwnd)
@@ -1040,6 +1328,7 @@ def bug_report_lines(plugins, tail):
              f"{APP_NAME} v{VERSION}",
              "Modules: " + ", ".join(
                  f"{p.caption} {p.Version} {'on' if p.enabled else 'off'}"
+                 + ("" if p.builtin else " (3rd-party)")
                  for p in plugins),
              f"Windows {wv.major}.{wv.minor} build {wv.build}, "
              f"Python {sys.version.split()[0]}",
@@ -1059,6 +1348,46 @@ def bug_report_url(plugins, tail):
         if len(url) <= REPORT_URL_MAX or not tail:
             return url
         tail = tail[1:]                       # drop the oldest line until it fits
+
+
+def parse_version(text, prefix):
+    """'py-v0.2.10' with prefix 'py-v' -> (0, 2, 10); () if it does not parse.
+    Tuples compare numerically: 0.2.10 > 0.2.9."""
+    text = (text or "").strip()
+    if prefix and text.startswith(prefix):
+        text = text[len(prefix):]
+    elif prefix:
+        return ()
+    text = text.lstrip("vV")
+    if not re.fullmatch(r"\d+(\.\d+)*", text):
+        return ()
+    return tuple(int(x) for x in text.split("."))
+
+
+def latest_release(repo, prefix):
+    """(tag, page url) of the highest published release of repo whose tag
+    is prefix + version, or None. Drafts and pre-releases are ignored; one
+    repo can carry several release streams (py-v*, ahk-v*). Raises on
+    network errors; no releases at all is simply None."""
+    url = "https://api.github.com/repos/%s/releases?per_page=30" % repo
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "%s/%s" % (APP_NAME, VERSION),
+        "Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=UPDATE_TIMEOUT_S) as r:
+            releases = json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None                      # repo gone or private
+        raise
+    best = None
+    for rel in releases:
+        if rel.get("draft") or rel.get("prerelease"):
+            continue
+        v = parse_version(rel.get("tag_name", ""), prefix)
+        if v and (best is None or v > best[0]):
+            best = (v, rel["tag_name"], rel.get("html_url", ""))
+    return (best[1], best[2]) if best else None
 
 
 def set_clipboard(text):
@@ -1142,6 +1471,9 @@ def spawn_respawn():
 
 
 def main():
+    # Third-party modules do "from unclonedtray_api import Plugin, ...":
+    # the running script itself is that module, so there is one Plugin class.
+    sys.modules["unclonedtray_api"] = sys.modules[__name__]
     open_log()
     respawn = 0
     if "--respawn" in sys.argv:

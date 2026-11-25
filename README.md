@@ -21,6 +21,11 @@ Part of the [Uncloned Math](https://uncloned.work) toolset.
 Each module gets its own tray submenu with an **Enabled** toggle. Settings
 persist in `UnclonedTray.ini` next to the script.
 
+The Python version also loads **third-party modules**: drop a `.py` file into
+`python\modules\` and restart. A new module stays off until you enable it.
+How to write one: [python/MODULES.md](python/MODULES.md), with a working
+example in [python/examples/](python/examples/).
+
 ## Why a host instead of separate scripts
 
 Each utility began as a standalone script — and each carried its own copy of
@@ -35,7 +40,7 @@ One host means one process and one instance, structurally rather than by
 convention. It also removes the triplicated autostart code that spawned stray
 `.lnk` files in `shell:startup`.
 
-## Not really "plugins"
+## Not really "plugins" (in the AutoHotkey version)
 
 AutoHotkey has no runtime module loading — `#Include` is resolved at load time
 and there is no globbing. "Modules" here means statically included classes
@@ -94,12 +99,28 @@ for exactly that situation:
 - reads the same `UnclonedTray.ini` (shared sections and keys), so a machine
   can switch implementations freely;
 - run with `pythonw.exe python\unclonedtray.py`; **Run at startup** writes a single
-  HKCU `Run` registry value.
+  HKCU `Run` registry value;
+- real drop-in modules (plugin API 1): files in `python\modules\`, off until
+  enabled, every call into a module guarded. A module that keeps failing is
+  switched off for the session; the host and the other modules keep running.
 
 The AutoHotkey version stays primary: its `Always *` modes suppress the key
 press outright via a native hook, which the port deliberately does not attempt.
 The trade is a few tens of milliseconds of toggle-and-revert for a zero-flag
 surface.
+
+## Updates
+
+Python version: **Updates → Check daily** in the tray menu (off by default).
+Once a day the tray asks GitHub for the releases of this repo and of every
+third-party module that names its repo. If there is a newer version, it shows
+a balloon once and an *Update available* item in the menu, which opens the
+release page. Nothing is downloaded or replaced: you update by hand. The
+request carries no data about you. GitHub sees your IP address and the
+`UnclonedTray-Py/<version>` user agent.
+
+Release tags: `py-vX.Y.Z` for the Python version, `ahk-vX.Y.Z` for the
+AutoHotkey one, so each checks only its own line.
 
 ## Bugs and feedback
 
@@ -116,7 +137,8 @@ browser that does nothing with them.
 What the log holds: start and exit, session-end and installer close requests,
 lock-key changes together with the title of the window that was in the
 foreground, and Python tracebacks, which include file paths (and so the Windows
-user name). Nothing leaves the machine unless you send the mail.
+user name). Nothing leaves the machine unless you send the mail
+(or turn on the update check, see above).
 
 ## License
 
