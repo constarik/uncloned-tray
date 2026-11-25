@@ -106,10 +106,12 @@ surface.
 Write to **constr+tray@gmail.com**: a couple of sentences on what happened,
 plus the run log `unclonedtray.log` (it sits next to `UnclonedTray.ini`).
 
-In the Python version, **Report a bug** in the tray menu prepares both: a mail
-draft with the versions and the last 15 log lines, and an Explorer window with
-the log selected, ready to attach — a `mailto:` link cannot attach a file
-itself.
+In the Python version, **Report a bug** in the tray menu prepares it: the
+report text (versions and the last 15 log lines) goes to the clipboard, ready
+to paste into any mail, and Explorer opens with the log selected, ready to
+attach. A mail draft is opened as well where the PC has a mail program — the
+menu item does not depend on it, since many machines hand `mailto:` links to a
+browser that does nothing with them.
 
 What the log holds: start and exit, session-end and installer close requests,
 lock-key changes together with the title of the window that was in the

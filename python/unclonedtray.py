@@ -1,5 +1,9 @@
 # =====================================================================
-#  unclonedtray.py  --  UnclonedTray-Py  v0.1.11
+#  unclonedtray.py  --  UnclonedTray-Py  v0.1.12
+#  v0.1.12: "Report a bug" no longer depends on the mail draft (a PC whose
+#          mailto: handler is a browser without a mail service shows
+#          nothing): the report text goes to the clipboard and a message
+#          says where to send it; the draft is still attempted
 #  v0.1.11: menu item "Report a bug" - opens a mail draft to CONTACT with
 #          the versions and the last log lines, and Explorer with the
 #          log selected (a mailto: link cannot attach a file); contact
@@ -67,7 +71,7 @@ import urllib.parse
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.1.11"
+VERSION  = "0.1.12"
 CONTACT  = "constr+tray@gmail.com"     # bug reports and feedback
 
 user32   = ctypes.WinDLL("user32",   use_last_error=True)
@@ -199,6 +203,15 @@ user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 user32.MapVirtualKeyW.argtypes           = [wintypes.UINT, wintypes.UINT]
 user32.MapVirtualKeyW.restype            = wintypes.UINT
 kernel32.GetCurrentThreadId.restype      = wintypes.DWORD
+user32.OpenClipboard.argtypes     = [wintypes.HWND]
+user32.SetClipboardData.restype   = wintypes.HANDLE
+user32.SetClipboardData.argtypes  = [wintypes.UINT, wintypes.HANDLE]
+kernel32.GlobalAlloc.restype      = wintypes.HANDLE
+kernel32.GlobalAlloc.argtypes     = [wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalLock.restype       = ctypes.c_void_p
+kernel32.GlobalLock.argtypes      = [wintypes.HANDLE]
+kernel32.GlobalUnlock.argtypes    = [wintypes.HANDLE]
+kernel32.GlobalFree.argtypes      = [wintypes.HANDLE]
 
 
 # ----------------------------- config --------------------------------
@@ -902,23 +915,39 @@ class TrayHost:
             lines.append(line)
         lines += ["", f"Config: {self.cfg.path}", f"Log: {log_path()}", "",
                   f"Bugs & feedback: {CONTACT}",
-                  "(menu \"Report a bug\" opens a mail draft; attach the log)",
+                  "(menu \"Report a bug\": report text to the clipboard,",
+                  " mail draft, log selected in Explorer)",
                   "", "Python  |  uncloned.work"]
         self.msgbox("\n".join(lines))
 
     def report_bug(self):
-        # A mailto: link cannot attach a file: the draft carries the versions
-        # and the last log lines, Explorer opens with the log selected.
+        # Must work on a PC with no mail program: the report text goes to
+        # the clipboard and the message says where to send it. A mailto:
+        # draft is still attempted, and Explorer opens with the log
+        # selected (a mailto: link cannot attach a file).
         path = log_path()
-        try:
-            os.startfile(bug_report_url(self.plugins))
-            log("bug report: mail draft opened")
-        except OSError as e:
-            log("bug report: no mail draft (%s)" % e)
-            self.msgbox(f"Could not open a mail draft.\n\nWrite to {CONTACT}: "
-                        f"what happened, and attach\n{path}")
+        tail = log_tail(REPORT_LOG_LINES)
+        copied = set_clipboard("\r\n".join(bug_report_lines(self.plugins, tail)))
+        log("bug report: text %s" % ("copied to the clipboard" if copied
+                                     else "NOT copied (clipboard busy)"))
+        self.msgbox(
+            f"Send the bug report to {CONTACT}\n\n"
+            + ("1. The report text (versions, last log lines) is now in the\n"
+               "    clipboard: paste it into a mail with Ctrl+V and add what\n"
+               "    happened.\n" if copied else
+               "1. Write what happened and which version this is\n"
+               f"    ({APP_NAME} v{VERSION}).\n")
+            + "2. Attach the log file:\n"
+            f"    {path}\n\n"
+            "After OK: Explorer opens with the log selected, and a mail\n"
+            "draft - if this PC has a mail program.")
         if os.path.exists(path):
             subprocess.Popen('explorer /select,"%s"' % path)
+        try:
+            os.startfile(bug_report_url(self.plugins, tail))
+            log("bug report: mail draft requested")
+        except OSError as e:
+            log("bug report: no mail draft (%s)" % e)
 
     def msgbox(self, text):
         user32.MessageBoxW(None, text, APP_NAME, 0x40)   # MB_ICONINFORMATION
@@ -994,33 +1023,71 @@ REPORT_LOG_LINES = 15       # log tail quoted in the bug-report draft
 REPORT_URL_MAX   = 2000     # longer mailto: links are cut or refused by the shell
 
 
-def bug_report_url(plugins):
-    """mailto: link for a bug report - versions and the log tail in the body."""
+def log_tail(n):
     try:
         with open(log_path(), encoding="utf-8", errors="replace") as f:
-            tail = [ln.rstrip() for ln in f.readlines()[-REPORT_LOG_LINES:]]
+            return [ln.rstrip() for ln in f.readlines()[-n:]]
     except OSError:
-        tail = []
+        return []
+
+
+def bug_report_lines(plugins, tail):
+    """Text of a bug report: versions and the given log lines."""
     wv = sys.getwindowsversion()
-    head = ["What happened:", "", "", "",
-            "Please attach unclonedtray.log (Explorer has opened with it selected).",
-            "",
-            f"{APP_NAME} v{VERSION}",
-            "Modules: " + ", ".join(
-                f"{p.caption} {p.Version} {'on' if p.enabled else 'off'}"
-                for p in plugins),
-            f"Windows {wv.major}.{wv.minor} build {wv.build}, "
-            f"Python {sys.version.split()[0]}",
-            ""]
+    lines = ["What happened:", "", "", "",
+             "Please attach unclonedtray.log (selected in the Explorer window).",
+             "",
+             f"{APP_NAME} v{VERSION}",
+             "Modules: " + ", ".join(
+                 f"{p.caption} {p.Version} {'on' if p.enabled else 'off'}"
+                 for p in plugins),
+             f"Windows {wv.major}.{wv.minor} build {wv.build}, "
+             f"Python {sys.version.split()[0]}",
+             ""]
+    if tail:
+        lines += [f"Last {len(tail)} log lines:"] + tail
+    return lines
+
+
+def bug_report_url(plugins, tail):
+    """mailto: link with the report as the body, cut to what the shell takes."""
     to = urllib.parse.quote(CONTACT, safe="@")     # "+" must travel as %2B
     subject = urllib.parse.quote(f"{APP_NAME} v{VERSION} bug")
     while True:
-        body = head + ([f"Last {len(tail)} log lines:"] + tail if tail else [])
-        url = "mailto:%s?subject=%s&body=%s" % (
-            to, subject, urllib.parse.quote("\r\n".join(body)))
+        url = "mailto:%s?subject=%s&body=%s" % (to, subject, urllib.parse.quote(
+            "\r\n".join(bug_report_lines(plugins, tail))))
         if len(url) <= REPORT_URL_MAX or not tail:
             return url
         tail = tail[1:]                       # drop the oldest line until it fits
+
+
+def set_clipboard(text):
+    """Put text on the clipboard; False if the clipboard could not be taken."""
+    data = ctypes.create_unicode_buffer(text)
+    size = ctypes.sizeof(data)
+    for _ in range(5):                        # another program may hold it briefly
+        if user32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        return False
+    try:
+        user32.EmptyClipboard()
+        h = kernel32.GlobalAlloc(0x0002, size)            # GMEM_MOVEABLE
+        if not h:
+            return False
+        ptr = kernel32.GlobalLock(h)
+        if not ptr:
+            kernel32.GlobalFree(h)
+            return False
+        ctypes.memmove(ptr, data, size)
+        kernel32.GlobalUnlock(h)
+        if not user32.SetClipboardData(13, h):            # CF_UNICODETEXT
+            kernel32.GlobalFree(h)
+            return False
+        return True                           # the clipboard owns the memory now
+    finally:
+        user32.CloseClipboard()
 
 
 def open_log():
