@@ -1,5 +1,8 @@
 # =====================================================================
-#  unclonedtray.py  --  UnclonedTray-Py  v0.2.0
+#  unclonedtray.py  --  UnclonedTray-Py  v0.2.1
+#  v0.2.1: tray menu "Modules" submenu replaces "Modules folder": every
+#          module with a check mark (click = enable/disable), files that
+#          did not load greyed out with the reason, "Open modules folder"
 #  v0.2.0: plugin API 1 - third-party modules are .py files in
 #          python\modules\ (see python\MODULES.md), found at start, off
 #          until the user enables them; module timers and Raw Input go
@@ -84,7 +87,7 @@ import threading
 from ctypes import wintypes
 
 APP_NAME = "UnclonedTray-Py"
-VERSION  = "0.2.0"
+VERSION  = "0.2.1"
 CONTACT  = "constr+tray@gmail.com"     # bug reports and feedback
 
 API_VERSION     = 1                    # plugin API; a module must declare the same
@@ -114,6 +117,7 @@ NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 0x1, 0x2, 0x4, 0x10
 NIIF_INFO = 0x1
 
 MF_STRING, MF_CHECKED, MF_POPUP, MF_SEPARATOR = 0x0, 0x8, 0x10, 0x800
+MF_GRAYED = 0x1
 TPM_RETURNCMD, TPM_RIGHTBUTTON = 0x100, 0x2
 IDI_APPLICATION = 32512
 IMAGE_ICON      = 1
@@ -1115,7 +1119,7 @@ class TrayHost:
         self.add_item(upd, "Check daily", self.toggle_updates, self.updates_on())
         self.add_item(upd, "Check now", self.check_updates)
         self.add_submenu(root, "Updates", upd)
-        self.add_item(root, "Modules folder", self.open_modules_dir)
+        self.add_submenu(root, "Modules", self.build_modules_menu())
         self.add_sep(root)
         self.add_item(root, "About", self.show_about)
         self.add_item(root, "Report a bug", self.report_bug)
@@ -1136,6 +1140,28 @@ class TrayHost:
                 fn()
             except Exception as e:
                 self.msgbox(f"Action failed:\n{e}")
+
+    def build_modules_menu(self):
+        """Every module with a check mark (click = enable/disable), files
+        that did not load greyed out with the reason, then the folder."""
+        sub = self.new_menu()
+        third_party = False
+        for p in self.plugins:
+            if not p.builtin and not third_party:
+                self.add_sep(sub)               # third-party modules below the line
+                third_party = True
+            label = f"{p.caption}  v{p.Version}"
+            if not p.builtin:
+                label += f"  ({os.path.basename(p.source)})"
+            self.add_item(sub, label, (lambda pp=p: self.toggle_module(pp)), p.enabled)
+        if self.skipped:
+            self.add_sep(sub)
+            for fname, why in self.skipped:
+                user32.AppendMenuW(sub, MF_STRING | MF_GRAYED, 0,
+                                   f"{fname} - not loaded: {why}")
+        self.add_sep(sub)
+        self.add_item(sub, "Open modules folder", self.open_modules_dir)
+        return sub
 
     # ------------------------- actions --------------------------------
 
